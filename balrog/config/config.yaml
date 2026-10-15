@@ -6,6 +6,12 @@ agent:
   max_cot_history: 1     # Maximum number of chain-of-thought steps to keep in history (if using 'cot' type of agent)
   max_icl_history: 1000   # Maximum number of ICL steps to keep in history (if using 'few_shot' type of agent)
   cache_icl: False
+  # Assignment 2 agents use these limits; existing BALROG agents ignore them.
+  max_plan_words: 80
+  max_subgoal_words: 32
+  max_recent_observations: 3
+  reflection_interval: 4
+  max_reflection_lessons: 3
 
 eval:
   output_dir: "results"  # Directory where evaluation results will be saved

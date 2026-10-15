@@ -53,6 +53,8 @@ class LLMClientWrapper:
         self.max_retries = client_config.max_retries
         self.delay = client_config.delay
         self.alternate_roles = client_config.alternate_roles
+        self.last_call_attempts = 0
+        self.last_retry_errors = []
 
     def generate(self, messages):
         """Generate a response from the LLM given a list of messages.
@@ -82,11 +84,15 @@ class LLMClientWrapper:
             Exception: If the function fails after the maximum number of retries.
         """
         retries = 0
+        self.last_call_attempts = 0
+        self.last_retry_errors = []
         while retries < self.max_retries:
             try:
+                self.last_call_attempts += 1
                 return func(*args, **kwargs)
             except Exception as e:
                 retries += 1
+                self.last_retry_errors.append(f"{type(e).__name__}: {e}")
                 logger.error(f"Retryable error during {func.__name__}: {e}. Retry {retries}/{self.max_retries}")
                 sleep_time = self.delay * (2 ** (retries - 1))  # Exponential backoff
                 time.sleep(sleep_time)

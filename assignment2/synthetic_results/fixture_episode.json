@@ -1,0 +1,25 @@
+{
+  "schema_version": 1,
+  "status": "completed",
+  "data_kind": "synthetic",
+  "phase": "synthetic",
+  "spec": {
+    "model": "synthetic-model",
+    "benchmark": "babyai",
+    "agent": "planning",
+    "task": "synthetic-task",
+    "seed": 1,
+    "repeat_index": 0
+  },
+  "outcome": {
+    "progression": 0.5,
+    "success": false,
+    "steps": 3,
+    "invalid_actions": 0
+  },
+  "usage": {
+    "episode_estimated_cost_usd": 0.0,
+    "calls": []
+  },
+  "elapsed_seconds": 0.1
+}
