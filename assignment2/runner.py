@@ -55,7 +55,7 @@ def git_commit(repository_root):
 class ExperimentRunner:
     """Run only the cells specified in the assignment experiment manifest."""
 
-    def __init__(self, repository_root, study_config, phase, resume_directory=None, model_names=None):
+    def __init__(self, repository_root, study_config, phase, resume_directory=None, run_directory=None, model_names=None):
         self.repository_root = Path(repository_root)
         self.study_config = study_config
         self.phase = phase
@@ -65,10 +65,19 @@ class ExperimentRunner:
         self.model_names = list(model_names or self.phase_config.models)
         self._validate_manifest()
 
+        if resume_directory and run_directory:
+            raise ValueError("resume_directory and run_directory cannot both be set.")
         if resume_directory:
             self.run_directory = Path(resume_directory)
             if not self.run_directory.is_dir():
                 raise ValueError(f"Resume directory does not exist: {self.run_directory}")
+        elif run_directory:
+            self.run_directory = Path(run_directory)
+            if self.run_directory.exists():
+                raise ValueError(
+                    f"New run directory already exists: {self.run_directory}. Use --resume to continue it."
+                )
+            self.run_directory.mkdir(parents=True, exist_ok=False)
         else:
             timestamp = datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
             self.run_directory = self.repository_root / self.study_config.output_root / f"{timestamp}_{phase}"
@@ -79,7 +88,15 @@ class ExperimentRunner:
         self.base_config = OmegaConf.load(self.repository_root / "balrog/config/config.yaml")
         self.source_commit = git_commit(self.repository_root)
         self.run_id = self.run_directory.name
-        self.run_ledger = self._build_ledger(phase)
+        self.api_ledger_path = self._api_ledger_path()
+        self.run_ledger = self._build_api_ledger()
+        self.local_usage_ledger = BudgetLedger(
+            ceiling_usd=0.0,
+            max_input_tokens=self.study_config.budget.max_input_tokens_per_call,
+            max_output_tokens=self.study_config.budget.max_output_tokens_per_call,
+            input_price_per_million=0.0,
+            output_price_per_million=0.0,
+        )
 
     def _validate_manifest(self):
         for model_name in self.model_names:
@@ -115,7 +132,10 @@ class ExperimentRunner:
                             }
                         )
         for repeated in self.phase_config.get("repeated_runs", []):
-            repeated_models = list(repeated.get("models", self.model_names))
+            # A scheduled one-model job must not silently add another model's
+            # repeated subset. A combined job still includes both profiles.
+            configured_models = list(repeated.get("models", self.model_names))
+            repeated_models = [model_name for model_name in configured_models if model_name in self.model_names]
             repeated_agents = list(repeated.get("agents", self.phase_config.agents))
             for model_name in repeated_models:
                 for agent_name in repeated_agents:
@@ -175,14 +195,24 @@ class ExperimentRunner:
     def _next_attempt_path(self, episode_key):
         return next_attempt_path(self.episodes_directory, episode_key)
 
-    def _build_ledger(self, phase_name):
-        limit = self.study_config.budget.get(f"{phase_name}_ceiling_usd", self.study_config.budget.total_ceiling_usd)
-        return BudgetLedger(
-            ceiling_usd=limit,
+    def _api_ledger_path(self):
+        configured_path = os.environ.get("ASSIGNMENT2_BUDGET_LEDGER_PATH")
+        if configured_path:
+            return Path(configured_path)
+        output_root = Path(self.study_config.output_root)
+        if not output_root.is_absolute():
+            output_root = self.repository_root / output_root
+        return output_root / "api_spending_ledger.json"
+
+    def _build_api_ledger(self):
+        """Use one durable USD 10 ledger across smoke, pilot, final, and resumes."""
+        return BudgetLedger.load_or_create(
+            ceiling_usd=self.study_config.budget.total_ceiling_usd,
             max_input_tokens=self.study_config.budget.max_input_tokens_per_call,
             max_output_tokens=self.study_config.budget.max_output_tokens_per_call,
             input_price_per_million=self.study_config.budget.conservative_input_usd_per_million,
             output_price_per_million=self.study_config.budget.conservative_output_usd_per_million,
+            state_path=self.api_ledger_path,
         )
 
     def _record_header(self, spec, config, episode_key, config_fingerprint):
@@ -212,7 +242,7 @@ class ExperimentRunner:
 
     def _run_episode(self, spec, config, record):
         profile = self.study_config.models[spec["model"]]
-        ledger = self.run_ledger
+        ledger = self.run_ledger if profile.client_name == "gemini" else self.local_usage_ledger
         first_call_index = len(ledger.calls)
         agent = None
         environment = None
@@ -314,6 +344,7 @@ class ExperimentRunner:
             "source_commit": self.source_commit,
             "study_config": OmegaConf.to_container(self.study_config, resolve=True),
             "execution_note": "One worker only. Existing complete, compatible episodes are skipped on resume.",
+            "api_budget_ledger_path": str(self.api_ledger_path),
         }
         atomic_json_write(self.run_directory / "manifest.json", manifest)
         planned = self._episode_specs()
@@ -344,6 +375,6 @@ class ExperimentRunner:
             f"output={self.run_directory}"
         )
         manifest["completed_at"] = utc_now()
-        manifest["budget"] = self.run_ledger.snapshot()
+        manifest["api_budget"] = self.run_ledger.snapshot()
         atomic_json_write(self.run_directory / "manifest.json", manifest)
         return self.run_directory

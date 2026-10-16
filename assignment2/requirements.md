@@ -46,5 +46,7 @@ future real runs.
 The local profile proposes `Qwen/Qwen2.5-7B-Instruct` served by vLLM. It is a
 7B instruction model, fits the requested 3-8B range, uses BALROG's existing
 OpenAI-compatible vLLM client, and is a conservative fit for one allocated
-48 GB L40S. This is a deployment plan, not a claim that the model is installed
-or that its quality/availability has been validated on LIACS.
+L40S. The allocated GPU memory and the compatible vLLM/CUDA environment still
+need verification on a compute node. This is a deployment plan, not a claim
+that the model is installed or that its quality/availability has been validated
+on LIACS.

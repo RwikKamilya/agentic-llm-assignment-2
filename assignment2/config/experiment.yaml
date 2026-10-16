@@ -18,8 +18,9 @@ execution:
 # These are intentionally conservative guardrails, not a claim about a
 # provider's live price. Verify current pricing and replace them before a run.
 budget:
+  # One persistent ledger covers every Gemini request across smoke, pilot,
+  # final, retries, and Slurm resubmissions.
   total_ceiling_usd: 10.00
-  pilot_ceiling_usd: 1.00
   max_input_tokens_per_call: 8192
   max_output_tokens_per_call: 384
   conservative_input_usd_per_million: 1.00

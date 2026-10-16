@@ -24,10 +24,14 @@ def included_paths(exercise):
         "assignment2/run_experiment.py",
         "assignment2/storage.py",
         "assignment2/scripts/inspect_remote.sh",
+        "assignment2/scripts/check_python_environments.sh",
+        "assignment2/scripts/setup.sbatch",
+        "assignment2/scripts/run_pipeline.sbatch",
         "assignment2/scripts/start_vllm.sh",
         "assignment2/scripts/stop_vllm.sh",
         "balrog/config/config.yaml",
         "balrog/agents/__init__.py",
+        "balrog/client.py",
     ]
     if exercise >= 2:
         common.append("assignment2/agents.py")

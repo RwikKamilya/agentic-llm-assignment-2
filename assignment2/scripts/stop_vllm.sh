@@ -1,7 +1,11 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-LOG_DIRECTORY="${LOG_DIRECTORY:-assignment2/server_logs}"
+LOG_DIRECTORY="${ASSIGNMENT2_LOG_DIRECTORY:-${LOG_DIRECTORY:-}}"
+if [[ -z "$LOG_DIRECTORY" ]]; then
+  echo "Set ASSIGNMENT2_LOG_DIRECTORY to the persistent vLLM log directory." >&2
+  exit 1
+fi
 PID_FILE="$LOG_DIRECTORY/vllm.pid"
 if [[ ! -f "$PID_FILE" ]]; then
   echo "No PID file found at $PID_FILE; nothing was stopped."

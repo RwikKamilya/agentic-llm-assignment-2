@@ -1,5 +1,7 @@
 import copy
+import tempfile
 import unittest
+from pathlib import Path
 
 from assignment2.agents import (
     LLMResponse,
@@ -152,3 +154,54 @@ class AssignmentAgentTests(unittest.TestCase):
         self.assertEqual(call["retries"], 1)
         self.assertEqual(call["retry_errors"], ["TimeoutError: simulated timeout"])
         self.assertGreater(call["estimated_cost_usd"], 0.0)
+
+    def test_persistent_budget_is_not_reset_when_a_job_is_resubmitted(self):
+        with tempfile.TemporaryDirectory() as directory:
+            state_path = Path(directory) / "api_spending_ledger.json"
+            ledger = BudgetLedger.load_or_create(
+                ceiling_usd=1.0,
+                max_input_tokens=500_000,
+                max_output_tokens=0,
+                input_price_per_million=1.0,
+                output_price_per_million=0.0,
+                state_path=state_path,
+            )
+            reservation = ledger.reserve("actor")
+            ledger.record(reservation, 500_000, 0, "stop")
+
+            resumed_ledger = BudgetLedger.load_or_create(
+                ceiling_usd=1.0,
+                max_input_tokens=500_000,
+                max_output_tokens=0,
+                input_price_per_million=1.0,
+                output_price_per_million=0.0,
+                state_path=state_path,
+            )
+            self.assertAlmostEqual(resumed_ledger.estimated_spent_usd, 0.5)
+            with self.assertRaises(Exception):
+                resumed_ledger.reserve("actor", max_attempts=2)
+
+    def test_inflight_persistent_reservation_remains_charged_after_interruption(self):
+        with tempfile.TemporaryDirectory() as directory:
+            state_path = Path(directory) / "api_spending_ledger.json"
+            ledger = BudgetLedger.load_or_create(
+                ceiling_usd=1.0,
+                max_input_tokens=500_000,
+                max_output_tokens=0,
+                input_price_per_million=1.0,
+                output_price_per_million=0.0,
+                state_path=state_path,
+            )
+            ledger.reserve("actor")
+
+            resumed_ledger = BudgetLedger.load_or_create(
+                ceiling_usd=1.0,
+                max_input_tokens=500_000,
+                max_output_tokens=0,
+                input_price_per_million=1.0,
+                output_price_per_million=0.0,
+                state_path=state_path,
+            )
+            self.assertAlmostEqual(resumed_ledger.reserved_usd, 0.5)
+            with self.assertRaises(Exception):
+                resumed_ledger.reserve("actor", max_attempts=2)

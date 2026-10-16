@@ -1,180 +1,222 @@
-# Assignment 2 remote runbook
+# Assignment 2 LIACS deployment runbook
 
-This runbook prepares future execution only. No API request, remote connection,
-model download, model server, benchmark run, or scheduler submission was made
-while preparing this repository.
+This document prepares Slurm execution only. No SSH connection, submission,
+package installation, model download, API request, or benchmark episode was
+made while updating it.
 
-The commands marked **not yet remotely validated** depend on the actual LIACS
-allocation, scheduler, operating system, and installed modules. Do not run
-inference on a login node or assume that a visible GPU belongs to you.
+## Confirmed deployment facts
 
-## 1. Review and push local changes
+- `calcium` is a gateway/head node: do not run setup, a model server, Python
+  evaluation, or benchmarks there.
+- Use partition `L40s_students` with one node, task, and `gpu:nvidia_l40s:1`.
+  The accepted starting request is 4 CPUs, 32G RAM, and 12 hours. No account
+  option is required.
+- An allocation on `ceratanium` exposed one NVIDIA L40S with 46068 MiB and
+  driver 615.71.09. The CUDA version displayed by `nvidia-smi` is not treated
+  as an installed CUDA toolkit.
+- Only Python 3.9.25 was on `PATH`; no usable Python module, conda, or uv was
+  found. Setup therefore builds an isolated Python 3.11.11 below the project
+  root. Current vLLM GPU documentation supports Python 3.11–3.14 and ships
+  precompiled CUDA binaries, so setup does not assume a system CUDA toolkit.
+  [vLLM GPU installation guide](https://docs.vllm.ai/en/latest/getting_started/installation/gpu/)
+- `/home`, `/local`, and `/tmp` are too small for environments or model data.
+  Use `/data/s4822285/assignment2`, while treating its write permission,
+  quota, and retention as checks still required before setup.
 
-Run locally after reviewing the diff and tests:
+The repository location is fixed as:
 
-```bash
-git status
-git diff --check
-python3 -m unittest discover -s tests -v
-git add balrog/agents/__init__.py balrog/config/config.yaml assignment2 tests
-git commit -m "Prepare Assignment 2 planning and reflection experiments"
-git push origin assignment-2
+```text
+/data/s4822285/assignment2/repo
 ```
 
-## 2. Connect and inspect resources (**not yet remotely validated**)
+Both batch scripts require this environment value:
 
-The existing alias is already defined by the user. Connect without changing SSH
-configuration:
+```bash
+export ASS2_ROOT=/data/s4822285/assignment2
+```
+
+## 1. One-time preflight on the gateway
+
+These are filesystem checks only; do not create environments or run Python on
+the gateway.
 
 ```bash
 ssh l40s
+export ASS2_ROOT=/data/s4822285/assignment2
+test -d "$ASS2_ROOT/repo" && test -f "$ASS2_ROOT/repo/assignment2/scripts/setup.sbatch"
+test -w "$ASS2_ROOT"
+mkdir -p "$ASS2_ROOT/logs"
+df -h "$ASS2_ROOT"
 ```
 
-On the remote host, first inspect the site and allocation context. This script
-only reports information and discovers scheduler commands; it does not submit a
-job:
+Confirm the project-specific quota before choosing the free-space guard below.
+The shared `/data` free-space figure is not a quota guarantee.
 
 ```bash
-cd /path/to/agentic-llm-assignment-2
-bash assignment2/scripts/inspect_remote.sh
+export ASS2_MIN_FREE_GB=REPLACE_WITH_CONFIRMED_QUOTA_HEADROOM
 ```
 
-If the session is a login node or no allocated GPU is visible, stop there.
-Ask the site documentation or administrator which scheduler/allocation command
-to use. Only then choose a scheduler-specific interactive or batch workflow.
+The scripts intentionally refuse to run until this value is a positive
+integer. It is a guardrail, not a claim that the user has that quota.
 
-## 3. Install the project (**not yet remotely validated**)
+## 2. Submit setup only
 
-Inside the allocated environment, use a project-local virtual environment:
+`assignment2/scripts/setup.sbatch` has no `--account`, `--output`, `--error`,
+or `--chdir` directives. Supply those at submission time. It requests one
+allocated L40S, builds Python 3.11.11 under `/data/s4822285/assignment2`, then
+creates separate `envs/balrog` and `envs/vllm` environments.
+
+It sends build files, temporary files, pip files, Hugging Face data, Torch,
+Triton, and vLLM caches below the project root. It installs BALROG and its
+assets in the evaluation environment, installs vLLM in the serving environment,
+downloads the configured Qwen model snapshot, checks imports and GPU
+visibility, and saves package manifests below `setup/setup-JOB_ID/`.
+
+It does **not** use `GEMINI_API_KEY`, call Gemini, start vLLM, or run a
+benchmark episode.
+
+With the log paths chosen here as an example, submit:
 
 ```bash
-python3 -m venv .venv
-source .venv/bin/activate
-python -m pip install --upgrade pip
-python -m pip install -e .
-balrog-post-install
-python -m pip install matplotlib vllm
-python -m unittest discover -s tests -v
+sbatch \
+  --chdir=/data/s4822285/assignment2/repo \
+  --output=/data/s4822285/assignment2/logs/setup-%j.out \
+  --error=/data/s4822285/assignment2/logs/setup-%j.err \
+  assignment2/scripts/setup.sbatch
 ```
 
-`balrog-post-install` and vLLM/model setup may download required assets. Check
-available disk quota first; do not install into a nearly full shared filesystem.
-
-## 4. Configure secrets safely (**not yet remotely validated**)
-
-Do not edit or commit `SECRETS`. In the allocated shell, supply the cloud key
-only through the environment:
+Record the submitted job ID as `SETUP_JOB_ID`. Monitor without running work on
+the gateway:
 
 ```bash
-export GEMINI_API_KEY='paste-key-here'
+squeue -j SETUP_JOB_ID
+sacct -j SETUP_JOB_ID --format=JobID,State,Elapsed,ExitCode
 ```
 
-Confirm that the variable is set without printing its value:
+After Slurm reports completion, setup is successful only if both checks pass:
 
 ```bash
-test -n "$GEMINI_API_KEY" && echo "GEMINI_API_KEY is set"
+grep -Fx ASSIGNMENT2_SETUP_OK \
+  /data/s4822285/assignment2/logs/setup-SETUP_JOB_ID.out
+test -s /data/s4822285/assignment2/setup/setup-SETUP_JOB_ID/model-id.txt
 ```
 
-## 5. Start the local model endpoint (**not yet remotely validated**)
+If setup fails, inspect the matching `.err` and `.out` files. Do not attempt
+to repair the system Python, install system packages, or move environments to
+`/home`.
 
-In a confirmed GPU allocation, start the planned 7B model:
+## 3. Submit an experiment job
+
+`assignment2/scripts/run_pipeline.sbatch` has the same verified resource
+request and likewise has no account/log/chdir directives. It uses only the
+setup environments and persistent paths below `ASS2_ROOT`. At runtime it
+checks `timeout`, free space, the installed environments, and the already
+prepared local model snapshot before starting vLLM on `127.0.0.1` inside the
+allocated job.
+
+Use a 30-minute cleanup reserve unless you intentionally set another positive
+value. The launcher subtracts both that reserve and a two-minute termination
+grace period from the 12-hour limit before evaluation begins.
 
 ```bash
-source .venv/bin/activate
-bash assignment2/scripts/start_vllm.sh
-curl -fsS http://127.0.0.1:8080/v1/models
+export ASS2_CLEANUP_RESERVE_MINUTES=30
+export ASS2_PHASE=smoke
+export ASS2_MODELS="qwen_7b_local"
+unset ASS2_RESUME_DIRECTORY
+sbatch \
+  --chdir=/data/s4822285/assignment2/repo \
+  --output=/data/s4822285/assignment2/logs/run-%j.out \
+  --error=/data/s4822285/assignment2/logs/run-%j.err \
+  assignment2/scripts/run_pipeline.sbatch
 ```
 
-The vLLM script records one PID under `assignment2/server_logs/`. Stop that
-specific process when finished:
+For a Gemini phase, set `GEMINI_API_KEY` only in the submitting shell, without
+printing it or enabling shell tracing. The launcher never writes that variable
+to a log. Do not submit two Gemini-containing jobs concurrently: it uses an
+exclusive budget lock to protect the shared spending ledger.
+
+The persistent ledger is:
+
+```text
+/data/s4822285/assignment2/results/api_spending_ledger.json
+```
+
+It has a USD 10 ceiling from `assignment2/config/experiment.yaml`. Reservations
+are saved before each Gemini request and include retries. Consequently smoke,
+pilot, final, and resumed runs all consume one cumulative budget; a terminated
+job's unresolved reservation remains charged rather than being reset.
+
+Monitor a run with:
 
 ```bash
-bash assignment2/scripts/stop_vllm.sh
+squeue -j RUN_JOB_ID
+sacct -j RUN_JOB_ID --format=JobID,State,Elapsed,ExitCode
+tail -f /data/s4822285/assignment2/logs/run-RUN_JOB_ID.out
 ```
 
-## 6. Smoke tests (**not yet remotely validated**)
+## 4. Find and resume an interrupted run
 
-First run one local-model episode per benchmark and agent condition. This calls
-the local endpoint and writes a separate `smoke` result directory:
+For a new job, the result directory is deterministic:
+
+```text
+/data/s4822285/assignment2/results/PHASE_slurm-RUN_JOB_ID
+```
+
+List completed or partial directories without changing them:
 
 ```bash
-source .venv/bin/activate
-python assignment2/run_experiment.py --phase smoke --models qwen_7b_local
+find /data/s4822285/assignment2/results -maxdepth 1 -mindepth 1 -type d -name 'final_slurm-*' -print
 ```
 
-Then, only after consciously allowing cloud use within the budget, run the
-Gemini smoke test:
+Resume the exact selected directory via a new Slurm job. Keep the same phase
+and model list so only compatible completed episodes are skipped. The global
+USD 10 ledger is reused automatically; do not delete or replace it.
 
 ```bash
-python assignment2/run_experiment.py --phase smoke --models gemini_flash_lite
+export ASS2_CLEANUP_RESERVE_MINUTES=30
+export ASS2_PHASE=final
+export ASS2_MODELS="gemini_flash_lite qwen_7b_local"
+export ASS2_RESUME_DIRECTORY=/data/s4822285/assignment2/results/final_slurm-RUN_JOB_ID
+sbatch \
+  --chdir=/data/s4822285/assignment2/repo \
+  --output=/data/s4822285/assignment2/logs/resume-%j.out \
+  --error=/data/s4822285/assignment2/logs/resume-%j.err \
+  assignment2/scripts/run_pipeline.sbatch
 ```
 
-Inspect every completed record before proceeding. A smoke pass is not final
-evidence and must not be mixed with pilot or final analysis.
-
-## 7. Pilot, freeze settings, and final evaluation (**not yet remotely validated**)
-
-Use the pilot to validate model availability, action parsing, episode duration,
-usage estimates, and whether the conservative USD 1 pilot ceiling is practical:
+Do not remove `api_spending_ledger.json`. If a previous cloud job was killed
+so abruptly that its budget-lock directory remains, inspect its recorded owner
+and Slurm status before deciding how to clear it:
 
 ```bash
-python assignment2/run_experiment.py --phase pilot --models gemini_flash_lite
-python assignment2/run_experiment.py --phase pilot --models qwen_7b_local
+cat /data/s4822285/assignment2/results/api_spending_ledger.lock/owner
+sacct -j PREVIOUS_JOB_ID --format=JobID,State,Elapsed,ExitCode
 ```
 
-Before final runs, record any justified changes to model identifiers, prices,
-limits, or manifest in a commit. Do not silently alter tasks, seeds, or sample
-size. Run the fixed final manifest one model at a time:
+## 5. Final analysis and retrieve outputs
+
+A final job containing both model profiles analyses its one result directory
+before cleanup. If models were run separately, combine their two directories
+inside a Slurm allocation with `assignment2/analysis.py`; never combine smoke,
+pilot, synthetic, or incomplete data as final evidence.
+
+To retrieve persistent results and logs to the local machine after jobs finish:
 
 ```bash
-python assignment2/run_experiment.py --phase final --models gemini_flash_lite
-python assignment2/run_experiment.py --phase final --models qwen_7b_local
+rsync -av l40s:/data/s4822285/assignment2/results/ ./assignment2-results/
+rsync -av l40s:/data/s4822285/assignment2/logs/ ./assignment2-logs/
 ```
 
-To resume an interrupted run, reuse its exact result directory. Completed
-records with a matching fingerprint are skipped; incomplete records remain as
-separate attempts:
+## 6. Local review and commit
+
+Run these locally, not on calcium:
 
 ```bash
-python assignment2/run_experiment.py --phase final --resume assignment2/results/<run-directory>
+git diff --check
+python3 -m unittest discover -s tests -v
+git add balrog/agents/__init__.py balrog/client.py balrog/config/config.yaml assignment2 tests
+git commit -m "Prepare Assignment 2 L40S deployment"
 ```
 
-## 8. Analysis, report, and archives
-
-Analyse only one phase at a time:
-
-```bash
-python assignment2/analysis.py assignment2/results/<final-run-directory> \
-  --phase final \
-  --output assignment2/analysis/<final-run-directory>
-```
-
-Read the generated CSV files, figures, and selected traces. Then complete the
-evidence placeholders in `assignment2/report_outline.md`; do not claim a
-reflection benefit unless the matched comparisons support it.
-
-Finally create the three archives:
-
-```bash
-python assignment2/package_submission.py
-```
-
-Each archive deliberately contains `ARCHIVE_STATUS.json` marked **NOT
-SUBMISSION READY** until real results and required written answers have been
-added and reviewed.
-
-## Remote smoke-test acceptance checklist
-
-- [ ] Actual host, scheduler, allocation method, GPU count, GPU memory, CPU,
-  RAM, disk quota, and wall-time limit are recorded from the allocated context.
-- [ ] The environment installs and BALROG imports on the remote host.
-- [ ] `nvidia-smi` confirms an allocated GPU before vLLM starts.
-- [ ] The local `/v1/models` endpoint responds and BALROG's vLLM client reaches it.
-- [ ] `GEMINI_API_KEY` is present without appearing in logs or source files.
-- [ ] One BabyAI and one Crafter smoke episode complete for each intended agent.
-- [ ] Records contain raw outputs, parse outcomes, plans/reflections, seeds,
-  model settings, progression, calls, token availability, estimates, and paths.
-- [ ] Malformed actions and injected/mock model failures become explicit
-  invalid/incomplete records rather than successful zero scores.
-- [ ] Resume skips only compatible complete records and preserves incomplete attempts.
-- [ ] Pilot estimates remain below the chosen guardrail before final settings freeze.
+Do not claim setup or experiments succeeded until their Slurm logs and
+persisted records provide the evidence.
