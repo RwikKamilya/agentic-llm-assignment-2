@@ -136,7 +136,8 @@ fi
 "$SERVE_PYTHON" -m pip check
 
 "$REPO_ROOT/assignment2/scripts/check_python_environments.sh" "$EVAL_PYTHON" "$SERVE_PYTHON"
-"$EVAL_PYTHON" -m unittest discover -s "$REPO_ROOT/tests" -v
+env -u ASSIGNMENT2_BUDGET_LEDGER_PATH -u ASSIGNMENT2_OUTPUT_ROOT \
+  "$EVAL_PYTHON" -m unittest discover -s "$REPO_ROOT/tests" -v
 
 MODEL_ID="$("$EVAL_PYTHON" -c 'import sys; from omegaconf import OmegaConf; config = OmegaConf.load(sys.argv[1]); print(config.models.qwen_7b_local.model_id)' "$REPO_ROOT/assignment2/config/experiment.yaml")"
 "$SERVE_PYTHON" -c '

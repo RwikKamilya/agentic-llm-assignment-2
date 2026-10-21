@@ -262,6 +262,13 @@ class FakeEnvironment:
 
 class RunnerPreparationTests(unittest.TestCase):
     def setUp(self):
+        # A Slurm diagnostic may inherit the production ledger location. All
+        # synthetic runner tests must use their own temporary output root.
+        environment = patch.dict(os.environ)
+        environment.start()
+        self.addCleanup(environment.stop)
+        os.environ.pop('ASSIGNMENT2_BUDGET_LEDGER_PATH', None)
+        os.environ.pop('ASSIGNMENT2_OUTPUT_ROOT', None)
         self.temporary = tempfile.TemporaryDirectory()
         self.addCleanup(self.temporary.cleanup)
         self.config = OmegaConf.load(CONFIG)

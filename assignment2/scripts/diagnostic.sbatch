@@ -141,7 +141,8 @@ print('weight_shards', len(weights))
 print('weight_bytes', sum(path.stat().st_size for path in weights))
 Path(os.environ['TMPDIR'], 'qwen-snapshot.txt').write_text(str(snapshot))
 PY
-"$EVAL_PYTHON" -m unittest discover -s tests -v
+env -u ASSIGNMENT2_BUDGET_LEDGER_PATH -u ASSIGNMENT2_OUTPUT_ROOT \
+  "$EVAL_PYTHON" -m unittest discover -s tests -v
 "$EVAL_PYTHON" -m assignment2.audit_results "$ASS2_ROOT/results"
 "$EVAL_PYTHON" - <<'PY'
 import json
