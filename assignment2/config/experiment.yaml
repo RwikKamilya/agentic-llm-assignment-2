@@ -5,8 +5,8 @@ output_root: assignment2/results
 agent:
   max_text_history: 6
   max_image_history: 0
-  max_plan_words: 80
-  max_subgoal_words: 32
+  max_plan_words: 24
+  max_subgoal_words: 12
   max_recent_observations: 3
   reflection_interval: 4
   max_reflection_lessons: 3
@@ -15,14 +15,18 @@ execution:
   client_max_retries: 2
   retry_delay_seconds: 2
   request_timeout_seconds: 60
+  max_episode_attempts: 2
+  planned_phases: [smoke, final]
+  prompt_policy: trim_oldest_history_preserve_instructions_and_current_v1
 
-# Standard GPT-4o mini prices verified 2026-10-16 against official OpenAI docs.
+# Standard GPT-4o mini prices verified 2026-10-21 against official OpenAI docs.
 # Cached input discounts are deliberately not assumed.
 budget:
   # Historical charges/reservations stay in the same cumulative ledger.
-  total_ceiling_usd: 60.00
-  max_input_tokens_per_call: 8192
-  max_output_tokens_per_call: 384
+  total_ceiling_usd: 15.00
+  recovery_reserve_usd: 1.00
+  max_input_tokens_per_call: 4096
+  max_output_tokens_per_call: 256
   conservative_input_usd_per_million: 0.15
   conservative_output_usd_per_million: 0.60
 
@@ -32,18 +36,18 @@ models:
     model_id: gpt-4o-mini-2024-07-18
     hosting_method: openai_api
     temperature: 0.2
-    max_output_tokens: 384
+    max_output_tokens: 256
   qwen_7b_local:
     client_name: vllm
     model_id: Qwen/Qwen2.5-7B-Instruct
     base_url: http://127.0.0.1:8080/v1
     hosting_method: vllm_on_allocated_l40s
     temperature: 0.2
-    max_output_tokens: 384
+    max_output_tokens: 256
 
 benchmarks:
   babyai:
-    max_steps: 128
+    max_steps: 64
     # Development, pilot, and final lists are deliberately disjoint.
     episodes:
       smoke:
@@ -69,8 +73,8 @@ benchmarks:
         - {task: BabyAI-MixedTrainLocal-v0/putnext, seed: 3109}
         - {task: BabyAI-MixedTrainLocal-v0/pick_up_seq_go_to, seed: 3110}
   crafter:
-    # A 250-step evaluation, not a reproduction of the original 1000-step setting.
-    max_steps: 250
+    # A 128-step evaluation, not a reproduction of the original 1000-step setting.
+    max_steps: 128
     episodes:
       smoke:
         - {task: default, seed: 401}
@@ -98,7 +102,8 @@ benchmarks:
 phases:
   smoke:
     models: [openai_mini, qwen_7b_local]
-    max_steps: {babyai: 32, crafter: 32}
+    max_steps: {babyai: 5, crafter: 5}
+    agent_step_limits: {naive: 3, planning: 3, reflective_planning: 5}
     agents: [naive, planning, reflective_planning]
     benchmarks: [babyai, crafter]
   development:

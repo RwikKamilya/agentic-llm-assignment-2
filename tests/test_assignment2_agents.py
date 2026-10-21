@@ -106,7 +106,7 @@ class AssignmentAgentTests(unittest.TestCase):
         self.assertEqual(len(agent.lessons), 3)
         self.assertIsNone(agent.last_trace[1]["reflection"])
         self.assertTrue(agent.last_trace[2]["reflection"]["parse"]["valid"])
-        self.assertIn("Action 1: a1", client.messages[2][0].content)
+        self.assertIn("Prior action: a1", "\n".join(message.content for message in client.messages[2]))
 
     def test_model_error_stays_explicit(self):
         client = FakeClient([RuntimeError("network unavailable")])

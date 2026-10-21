@@ -18,6 +18,8 @@ from assignment2.budget import BudgetLedger, paid_run_lock
 from assignment2.analysis import main as analyze_main
 from assignment2.migrate_budget import migrate_ledger
 from assignment2.runner import ExperimentRunner, execution_source_hashes, source_provenance
+from assignment2.experiment_plan import planned_budget, planned_episodes
+from assignment2.prompts import input_token_upper_bound, trim_oldest_history
 from assignment2.storage import atomic_json_write
 from assignment2.validation import IncompletePhaseError, validate_run_directory
 from balrog.client import FatalClientError, OpenAIWrapper
@@ -25,6 +27,61 @@ from balrog.prompt_builder.history import HistoryPromptBuilder, Message
 
 ROOT = Path(__file__).resolve().parents[1]
 CONFIG = ROOT / 'assignment2/config/experiment.yaml'
+
+
+class FifteenDollarPlanTests(unittest.TestCase):
+    def test_actual_manifest_cost_includes_variability_critics_and_both_attempts(self):
+        config = OmegaConf.load(CONFIG)
+        report = planned_budget(config, .203296, 0.)
+        self.assertEqual(report['logical_calls'], {'smoke': 24, 'final': 6841})
+        self.assertAlmostEqual(report['max_new_cost_usd'], 10.544640)
+        self.assertAlmostEqual(report['remaining_after_plan_usd'], 4.252064)
+        self.assertTrue(report['fits_with_recovery_reserve'])
+        self.assertFalse(planned_budget(config, 4., 0.)['fits_with_recovery_reserve'])
+        self.assertEqual(len(planned_episodes(config, 'final', list(config.models))), 138)
+
+    def test_old_history_is_trimmed_but_instructions_current_state_and_format_survive(self):
+        original = [Message('user', 'Game rules and allowed actions.'),
+                    Message('user', 'oldest history ' * 800), Message('assistant', 'old action'),
+                    Message('user', 'recent history ' * 30), Message('assistant', 'recent action'),
+                    Message('user', 'Current observation: key. State: inspect. Reply: ACTION: command')]
+        prepared, metadata = trim_oldest_history(original, 4096)
+        self.assertLessEqual(input_token_upper_bound(prepared), 4096)
+        self.assertEqual(metadata['trimmed_history_messages'], 2)
+        self.assertEqual(prepared[0].content, original[0].content)
+        self.assertEqual(prepared[-1].content, original[-1].content)
+        self.assertEqual(len(original), 6)
+
+    def test_actor_and_critic_fit_with_full_history_and_compact_valid_replies(self):
+        config = OmegaConf.load(ROOT / 'balrog/config/config.yaml')
+        config.agent.reflection_interval = 4
+        class Client:
+            max_input_tokens = 4096
+            seen = []
+            def generate(self, messages):
+                self.seen.append(messages)
+                self_test.assertLessEqual(input_token_upper_bound(messages), 4096)
+                self_test.assertIn('GAME RULES', messages[0].content)
+                self_test.assertIn('CURRENT', messages[-1].content)
+                reply = ('LESSONS:\n- Inspect visible objects before moving.'
+                         if 'You are a critic' in messages[-1].content else
+                         'PLAN: inspect\nSUBGOAL: approach key\nEXPECTED_OUTCOME: key nearby\nACTION: go forward')
+                self_test.assertLessEqual(len(reply.encode('utf-8')), 256)
+                return LLMResponse('offline', reply, 'stop', 100, 30, None)
+        self_test = self
+        for model in ['openai_mini', 'qwen_7b_local']:
+            client = Client()
+            client.seen = []
+            builder = HistoryPromptBuilder(max_text_history=6, max_image_history=0, max_cot_history=0)
+            builder.update_instruction_prompt('GAME RULES: ' + 'allowed action. ' * 90)
+            agent = ReflectivePlanningAgent(lambda: client, builder, config)
+            for index in range(6):
+                obs = {'text': {'long_term_context': 'CURRENT ' + 'visible tile ' * 80,
+                                'short_term_context': ''}, 'image': None}
+                agent.act(obs, prev_action='go forward' if index else None)
+            self.assertEqual(len(client.seen), 7)
+            self.assertTrue(agent.last_trace[4]['reflection']['parse']['valid'])
+            self.assertTrue(all(trace['actor']['parse']['valid'] for trace in agent.last_trace))
 
 
 class DeploymentProvenanceTests(unittest.TestCase):
@@ -66,8 +123,8 @@ def client_config():
     config.model_id = 'gpt-4o-mini-2024-07-18'
     config.max_retries = 2
     config.delay = 0
-    config.max_input_tokens = 8192
-    config.generate_kwargs.max_tokens = 384
+    config.max_input_tokens = 4096
+    config.generate_kwargs.max_tokens = 256
     return config
 
 
@@ -129,7 +186,7 @@ class OpenAIAccountingTests(unittest.TestCase):
     def test_actor_critic_retry_costs_persist_and_unknown_usage_is_charged(self):
         with tempfile.TemporaryDirectory() as temporary:
             path = Path(temporary) / 'ledger.json'
-            ledger = BudgetLedger.load_or_create(60, 8192, 384, .15, .60, path)
+            ledger = BudgetLedger.load_or_create(15, 4096, 256, .15, .60, path)
             config = OmegaConf.load(ROOT / 'balrog/config/config.yaml')
             config.agent.reflection_interval = 1
             results = [response('PLAN: explore\nSUBGOAL: move\nEXPECTED_OUTCOME: room\nACTION: go forward'),
@@ -168,7 +225,7 @@ class OpenAIAccountingTests(unittest.TestCase):
             migrated = json.loads(path.read_text())
             for field in ['estimated_spent_usd', 'reserved_usd', 'calls']:
                 self.assertEqual(migrated[field], state[field])
-            resumed = BudgetLedger.load_or_create(60, 8192, 384, .15, .60, path)
+            resumed = BudgetLedger.load_or_create(15, 4096, 256, .15, .60, path)
             self.assertAlmostEqual(resumed.reserved_usd, .8)
             self.assertIsNone(migrate_ledger(path, OmegaConf.load(CONFIG).budget))
 
@@ -213,25 +270,29 @@ class RunnerPreparationTests(unittest.TestCase):
     def runner(self, phase='smoke', models=None, resume=None, name='run'):
         return ExperimentRunner(ROOT, self.config, phase, resume_directory=resume,
                                 run_directory=None if resume else Path(self.temporary.name) / name,
-                                model_names=models)
+                                model_names=models or ['qwen_7b_local'])
 
     def test_phase_matrices_disjoint_seeds_and_effective_fingerprints(self):
         for phase, models, count in [('smoke',['openai_mini'],6), ('smoke',['qwen_7b_local'],6),
-                                     ('pilot',None,48), ('final',None,138)]:
+                                     ('final',['openai_mini'],69), ('final',['qwen_7b_local'],69)]:
             runner = self.runner(phase, models, name=f'{phase}-{count}-{models}')
             self.assertEqual(len(runner._episode_specs()), count)
             for spec in runner._episode_specs():
                 config = runner._effective_config(spec)
                 self.assertEqual(config.eval.max_steps_per_episode,
-                                 32 if phase == 'smoke' else (128 if spec['benchmark'] == 'babyai' else 250))
+                                 (5 if spec['agent'] == 'reflective_planning' else 3) if phase == 'smoke' else (64 if spec['benchmark'] == 'babyai' else 128))
             if phase == 'final':
-                self.assertEqual(sum('variability_subset' in s for s in runner._episode_specs()), 18)
+                self.assertEqual(sum('variability_subset' in s for s in runner._episode_specs()), 9)
         runner = self.runner(name='fingerprint')
         spec = runner._episode_specs()[0]
         config = runner._effective_config(spec)
         original = runner._episode_key(spec, config)
         config.eval.max_steps_per_episode += 1
         self.assertNotEqual(original, runner._episode_key(spec, config))
+        with self.assertRaises(ValueError):
+            self.runner(phase='pilot', name='disabled-pilot')
+        with self.assertRaises(ValueError):
+            self.runner(models=['openai_mini', 'qwen_7b_local'], name='combined')
         seeds = [set(int(e.seed) for e in self.config.benchmarks[benchmark].episodes[phase])
                  for benchmark in ['babyai','crafter'] for phase in ['smoke','development','pilot','final']]
         for i, left in enumerate(seeds):
@@ -243,7 +304,7 @@ class RunnerPreparationTests(unittest.TestCase):
             def generate(self, messages):
                 return LLMResponse('synthetic-test-client',
                                    'PLAN: explore\nSUBGOAL: move\nEXPECTED_OUTCOME: room\nACTION: go forward'
-                                   if 'LESSONS:' not in messages[0].content else 'LESSONS:\n- Look first.',
+                                   if not any('You are a critic' in message.content for message in messages) else 'LESSONS:\n- Look first.',
                                    'stop', 100, 20, None)
         from assignment2.agents import LoggedNaiveAgent
         kind = {'naive': LoggedNaiveAgent, 'planning': PlanningAgent, 'reflective_planning': ReflectivePlanningAgent}
@@ -278,6 +339,14 @@ class RunnerPreparationTests(unittest.TestCase):
         self.assertEqual(len(paths), 1)
         self.assertEqual(json.loads(paths[0].read_text())['status'], 'incomplete')
 
+    def test_manual_resume_cannot_repeat_whole_episodes_without_a_bound(self):
+        runner = self.runner(models=['qwen_7b_local'])
+        key = 'bounded-recovery'
+        atomic_json_write(runner._next_attempt_path(key), {'status': 'incomplete'})
+        atomic_json_write(runner._next_attempt_path(key), {'status': 'incomplete'})
+        with self.assertRaises(IncompletePhaseError):
+            runner._next_attempt_path(key)
+
     def test_openai_runner_charges_actor_and_critic_and_accepts_zero_game_success(self):
         runner = self.runner(models=['openai_mini'])
         def reply(**kwargs):
@@ -293,7 +362,7 @@ class RunnerPreparationTests(unittest.TestCase):
                 with patch('assignment2.runner.make_env', side_effect=lambda *args: FakeEnvironment()):
                     directory = runner.run()
         calls = json.loads(runner.api_ledger_path.read_text())['calls']
-        self.assertEqual(sum(c['role'] == 'actor' for c in calls), 30)
+        self.assertEqual(sum(c['role'] == 'actor' for c in calls), 22)
         self.assertEqual(sum(c['role'] == 'critic' for c in calls), 2)
         self.assertTrue(all(c['provider'] == 'openai' for c in calls))
         self.assertEqual(validate_run_directory(directory)['completed'], 6)
@@ -323,8 +392,7 @@ class RunnerPreparationTests(unittest.TestCase):
                         runner.run()
                 sdk.return_value.chat.completions.create.assert_not_called()
         paths = list((runner.run_directory / 'episodes').glob('*.json'))
-        self.assertEqual(len(paths), 1)
-        self.assertEqual(json.loads(paths[0].read_text())['termination_reason'], 'budget_ceiling')
+        self.assertEqual(len(paths), 0)
 
     def test_cli_failure_is_nonzero_and_launcher_checks_qwen_conditionally(self):
         with patch.dict(os.environ, {'ASSIGNMENT2_OUTPUT_ROOT': self.config.output_root}, clear=True):

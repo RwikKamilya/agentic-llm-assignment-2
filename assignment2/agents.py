@@ -12,6 +12,7 @@ from balrog.agents.base import BaseAgent
 from balrog.prompt_builder.history import Message
 
 from assignment2.budget import BudgetExceeded
+from assignment2.prompts import trim_oldest_history
 
 
 # BALROG consumes response fields rather than a concrete response class.  A
@@ -77,7 +78,7 @@ def parse_reflection_response(response_text, max_lessons):
     for line in match.group(1).splitlines():
         cleaned = re.sub(r"^\s*(?:[-*]|\d+[.)])\s*", "", line).strip()
         if cleaned:
-            candidates.append(_compact_text(cleaned, 32))
+            candidates.append(_compact_text(cleaned, 16))
     if not candidates:
         return {"lessons": [], "valid": False, "errors": ["no lesson items"]}
     return {"lessons": candidates[:max_lessons], "valid": True, "errors": []}
@@ -106,10 +107,13 @@ class PlanningAgent(BaseAgent):
         self.call_trace = []
         self._recent_observations = []
         self._recent_actions = []
+        self.current_observation_text = ""
+        self.request_metadata = {}
 
     def _observe(self, observation):
         text = observation.get("text", {})
-        current = text.get("short_term_context") or text.get("long_term_context") or ""
+        current = "\n".join(str(text.get(key) or "") for key in ["short_term_context", "long_term_context"]).strip()
+        self.current_observation_text = current
         self._recent_observations.append(_compact_text(current, 160))
         self._recent_observations = self._recent_observations[-self.max_recent_observations :]
 
@@ -135,15 +139,18 @@ Corrective lessons:
 {lessons_text}
 
 Reply using all four headings exactly once:
-PLAN: <short plan, or UNCHANGED>
-SUBGOAL: <immediate subgoal>
-EXPECTED_OUTCOME: <what the next observation should show if this action helps>
+PLAN: <at most 24 words, or UNCHANGED>
+SUBGOAL: <at most 12 words>
+EXPECTED_OUTCOME: <at most 12 words; observable evidence>
 ACTION: <one valid game action>
+Keep the entire reply below 120 words. Include ACTION even if the plan is unchanged.
 """.strip()
 
     def _call_model(self, messages, role):
         reservation = None
         max_attempts = max(1, int(getattr(self.client, "max_retries", 1)))
+        maximum = int(getattr(self.client, "max_input_tokens", None) or 4096)
+        messages, self.request_metadata = trim_oldest_history(messages, maximum)
         if hasattr(self.client, "validate_request"):
             self.client.validate_request(messages)
         if self.budget_ledger is not None:
@@ -185,6 +192,7 @@ ACTION: <one valid game action>
             attempt_usage=getattr(self.client, "last_attempt_usage", []),
             provider=getattr(self.client, "client_name", None),
             model_id=getattr(self.client, "model_id", None),
+            prompt_metadata=self.request_metadata,
         )
 
     def _maybe_reflect(self):
@@ -314,32 +322,27 @@ class ReflectivePlanningAgent(PlanningAgent):
         if self.step_number == 0 or self.step_number % self.reflection_interval != 0:
             return None
         instruction = getattr(self.prompt_builder, "system_prompt", "") or ""
-        evidence = "\n".join(
-            f"Observation {index + 1}: {value}" for index, value in enumerate(self._recent_observations)
-        )
-        actions = "\n".join(
-            f"Action {index + 1}: {value}" for index, value in enumerate(self._recent_actions)
-        ) or "None yet."
+        messages = [Message(role="user", content=instruction)]
+        for observation, action in zip(self._recent_observations[:-1], self._recent_actions):
+            messages.append(Message(role="user", content=f"Earlier observation: {observation}\nPrior action: {action}"))
+        last_action = self._recent_actions[-1] if self._recent_actions else "None yet."
         critic_prompt = f"""
 You are a critic for a game-playing agent. Use only this game instruction and
 the observations and prior submitted actions below. Do not infer hidden state
 or invent rewards. Identify at most {self.max_lessons} short, concrete
-corrections for the next actions.
+corrections for the next actions, at most 16 words per lesson and 70 words total.
 
-Game instruction:
-{instruction}
+Current observation:
+{self.current_observation_text}
 
-Observed evidence:
-{evidence}
-
-Prior submitted actions:
-{actions}
+Most recent submitted action: {last_action}
 
 Reply only in this format:
 LESSONS:
 - <one corrective lesson>
 """.strip()
-        response, call_log = self._call_model([Message(role="user", content=critic_prompt)], "critic")
+        messages.append(Message(role="user", content=critic_prompt))
+        response, call_log = self._call_model(messages, "critic")
         parsed = parse_reflection_response(response.completion, self.max_lessons)
         if parsed["valid"]:
             self.lessons = parsed["lessons"]

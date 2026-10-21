@@ -32,7 +32,7 @@ MODEL_CACHE="$CACHE_ROOT/models"
 PACKAGE_CACHE="$CACHE_ROOT/pip"
 RESULTS_ROOT="$ASS2_ROOT/results"
 LOG_DIRECTORY="$ASS2_ROOT/logs/vllm-$SLURM_JOB_ID"
-PHASE="${ASS2_PHASE:?Set ASS2_PHASE to smoke, pilot, or final.}"
+PHASE="${ASS2_PHASE:?Set ASS2_PHASE to smoke or final.}"
 MODELS="${ASS2_MODELS:?Set ASS2_MODELS to one or more configured profiles.}"
 MIN_FREE_GB="${ASS2_MIN_FREE_GB:?Set a quota-aware minimum free-space threshold in GiB.}"
 CLEANUP_RESERVE_MINUTES="${ASS2_CLEANUP_RESERVE_MINUTES:-30}"
@@ -45,14 +45,14 @@ if [[ ! -d "$REPO_ROOT" || ! -f "$REPO_ROOT/assignment2/config/experiment.yaml" 
   echo "Expected repository is missing or incomplete: $REPO_ROOT" >&2
   exit 1
 fi
-if [[ "$PHASE" != "smoke" && "$PHASE" != "pilot" && "$PHASE" != "final" ]]; then
-  echo "ASS2_PHASE must be smoke, pilot, or final." >&2
+if [[ "$PHASE" != "smoke" && "$PHASE" != "final" ]]; then
+  echo "ASS2_PHASE must be smoke or final." >&2
   exit 1
 fi
 read -r -a MODEL_ARGS <<< "$MODELS"
 MODELS="${MODEL_ARGS[*]}"
-if (( ${#MODEL_ARGS[@]} == 0 )); then
-  echo "ASS2_MODELS must name at least one model profile." >&2
+if (( ${#MODEL_ARGS[@]} != 1 )); then
+  echo "Launch one model per job so cloud-budget failure cannot prevent Qwen evaluation." >&2
   exit 1
 fi
 if [[ ! "$MIN_FREE_GB" =~ ^[1-9][0-9]*$ ]] || [[ ! "$CLEANUP_RESERVE_MINUTES" =~ ^[1-9][0-9]*$ ]]; then
@@ -87,6 +87,7 @@ if ! command -v timeout >/dev/null 2>&1; then
   exit 1
 fi
 
+export PYTHONUNBUFFERED=1
 export TMPDIR="$ASS2_ROOT/tmp/runtime-$SLURM_JOB_ID"
 mkdir -p "$TMPDIR"
 export PATH="$(dirname "$EVAL_PYTHON"):$PATH"
@@ -211,7 +212,7 @@ echo "Evaluation is limited to ${AVAILABLE_EXPERIMENT_SECONDS}s; ${CLEANUP_RESER
 timeout --signal=TERM --kill-after="$TERMINATION_GRACE_SECONDS" "$AVAILABLE_EXPERIMENT_SECONDS" \
   "$EVAL_PYTHON" -u -m assignment2.run_experiment --phase "$PHASE" "${RUN_ARGUMENTS[@]}" --models "${MODEL_ARGS[@]}"
 
-if [[ "$PHASE" == "final" && " $MODELS " == *" openai_mini "* && " $MODELS " == *" qwen_7b_local "* ]]; then
+if [[ "$PHASE" == "final" ]]; then
   AVAILABLE_ANALYSIS_SECONDS=$((JOB_TIME_LIMIT_SECONDS - CLEANUP_RESERVE_MINUTES * 60 - TERMINATION_GRACE_SECONDS - SECONDS))
   if (( AVAILABLE_ANALYSIS_SECONDS <= 0 )); then
     echo "No time remains for final analysis before the cleanup reserve." >&2
@@ -220,7 +221,7 @@ if [[ "$PHASE" == "final" && " $MODELS " == *" openai_mini "* && " $MODELS " == 
   timeout --signal=TERM --kill-after="$TERMINATION_GRACE_SECONDS" "$AVAILABLE_ANALYSIS_SECONDS" \
     "$EVAL_PYTHON" -m assignment2.analysis "$RUN_DIRECTORY" --phase final --output "$RUN_DIRECTORY/analysis"
 else
-  echo "Final combined analysis was not run: supply both model profiles in one final job, or combine result directories separately."
+  echo "Smoke validation finished. Final model jobs analyze their own complete records; combine both final directories for cross-model analysis."
 fi
 
 echo "ASSIGNMENT2_PHASE_OK phase=$PHASE models=$MODELS run=$RUN_DIRECTORY"

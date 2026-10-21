@@ -1,4 +1,4 @@
-"""Explicit $10 -> $60 migration; run in an allocation before cloud evaluation."""
+"""Explicit backed-up migration to the reviewed cumulative $15 policy; run in an allocation before cloud evaluation."""
 
 import json
 import math
@@ -24,29 +24,31 @@ def migrate_ledger(path, budget_config):
             budget_config.max_output_tokens_per_call, budget_config.conservative_input_usd_per_million,
             budget_config.conservative_output_usd_per_million,
         )
-        if state.get("ceiling_usd") == 60.0 and state.get("pricing_policy") == target.pricing_policy():
+        if state.get("ceiling_usd") == target.ceiling_usd and state.get("pricing_policy") == target.pricing_policy():
             print("Ledger already has the requested policy; no changes made.")
             return None
-        if state.get("schema_version") != 1 or state.get("ceiling_usd") != 10.0 or target.ceiling_usd != 60.0:
-            raise ValueError("Only the reviewed schema-1 $10 -> $60 migration is supported.")
+        if state.get("schema_version") != 1 or state.get("ceiling_usd") not in {10.0, 15.0, 60.0} or target.ceiling_usd != 15.0:
+            raise ValueError("Only the reviewed schema-1 $10/$15/$60 -> $15 policy migration is supported.")
         for key in ["estimated_spent_usd", "reserved_usd"]:
             if key not in state or not math.isfinite(state[key]) or state[key] < 0:
                 raise ValueError(f"Invalid historical ledger balance: {key}")
         if not isinstance(state.get("calls"), list):
             raise ValueError("Historical ledger has no call list.")
+        if state["estimated_spent_usd"] + state["reserved_usd"] > target.ceiling_usd:
+            raise ValueError("Historical commitments exceed the requested ceiling; no migration performed.")
         timestamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S%fZ")
-        backup = path.with_name(f"{path.name}.before-60usd-{timestamp}.bak")
+        backup = path.with_name(f"{path.name}.before-15usd-{timestamp}.bak")
         with backup.open("xb") as handle:
             handle.write(original)
             handle.flush()
             os.fsync(handle.fileno())
         state.setdefault("migrations", []).append({
-            "at": timestamp, "backup": str(backup), "from_ceiling_usd": 10.0,
-            "to_ceiling_usd": 60.0, "previous_pricing_policy": state.get("pricing_policy"),
+            "at": timestamp, "backup": str(backup), "from_ceiling_usd": state["ceiling_usd"],
+            "to_ceiling_usd": 15.0, "previous_pricing_policy": state.get("pricing_policy"),
             "note": "Historical calls, estimated spend and outstanding reservations preserved verbatim; "
                     "OpenAI prices apply only to new calls. Historical provider costs are not repriced.",
         })
-        state["ceiling_usd"] = 60.0
+        state["ceiling_usd"] = target.ceiling_usd
         state["pricing_policy"] = target.pricing_policy()
         atomic_json_write(path, state)
         print(f"Migrated ledger; original bytes preserved at {backup}")

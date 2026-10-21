@@ -25,6 +25,8 @@ def included_paths(exercise):
         "assignment2/storage.py",
         "assignment2/agents.py",
         "assignment2/validation.py",
+        "assignment2/prompts.py",
+        "assignment2/experiment_plan.py",
         "assignment2/migrate_budget.py",
         "assignment2/audit_results.py",
         "assignment2/scripts/inspect_remote.sh",

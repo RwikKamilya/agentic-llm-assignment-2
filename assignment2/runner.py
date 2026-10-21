@@ -20,6 +20,7 @@ from pathlib import Path
 from omegaconf import OmegaConf
 
 from assignment2.agents import ModelCallError
+from assignment2.experiment_plan import planned_episodes, step_limit, logical_call_bound, cost_per_logical_call, planned_budget
 from assignment2.budget import BudgetExceeded, BudgetLedger, paid_run_lock
 from assignment2.storage import atomic_json_write, next_attempt_path
 from assignment2.validation import IncompletePhaseError, completed_record_problems, validate_run_directory
@@ -157,6 +158,10 @@ class ExperimentRunner:
         )
 
     def _validate_manifest(self):
+        if self.phase not in self.study_config.execution.planned_phases:
+            raise ValueError("Only smoke integration checks and final evaluation are planned; development/pilot are disabled.")
+        if len(self.model_names) != 1:
+            raise ValueError("Select one model per run so cloud-budget failure cannot block local Qwen.")
         if not self.model_names or len(set(self.model_names)) != len(self.model_names):
             raise ValueError("Select a nonempty, duplicate-free model list.")
         if not 1 <= int(self.study_config.execution.client_max_retries) <= 2:
@@ -192,48 +197,11 @@ class ExperimentRunner:
         if len({fingerprint(spec) for spec in specs}) != len(specs):
             raise ValueError("Duplicate episode identities in manifest.")
 
-    def _step_limit(self, benchmark):
-        return int(self.phase_config.get("max_steps", {}).get(
-            benchmark, self.study_config.benchmarks[benchmark].max_steps))
+    def _step_limit(self, benchmark, agent=None):
+        return step_limit(self.study_config, self.phase, benchmark, agent)
 
     def _episode_specs(self):
-        specs = []
-        for model_name in self.model_names:
-            for benchmark in self.phase_config.benchmarks:
-                entries = self.study_config.benchmarks[benchmark].episodes[self.phase]
-                for agent_name in self.phase_config.agents:
-                    for episode in entries:
-                        specs.append(
-                            {
-                                "model": model_name,
-                                "benchmark": benchmark,
-                                "agent": agent_name,
-                                "task": str(episode.task),
-                                "seed": int(episode.seed),
-                                "repeat_index": int(episode.get("repeat_index", 0)),
-                            }
-                        )
-        for repeated in self.phase_config.get("repeated_runs", []):
-            # A scheduled one-model job must not silently add another model's
-            # repeated subset. A combined job still includes both profiles.
-            configured_models = list(repeated.get("models", self.model_names))
-            repeated_models = [model_name for model_name in configured_models if model_name in self.model_names]
-            repeated_agents = list(repeated.get("agents", self.phase_config.agents))
-            for model_name in repeated_models:
-                for agent_name in repeated_agents:
-                    for repeat_index in range(int(repeated.repeats)):
-                        specs.append(
-                            {
-                                "model": model_name,
-                                "benchmark": str(repeated.benchmark),
-                                "agent": agent_name,
-                                "task": str(repeated.task),
-                                "seed": int(repeated.seed),
-                                "repeat_index": repeat_index + 1,
-                                "variability_subset": str(repeated.name),
-                            }
-                        )
-        return specs
+        return planned_episodes(self.study_config, self.phase, self.model_names)
 
     def _effective_config(self, spec):
         config = copy.deepcopy(self.base_config)
@@ -257,8 +225,11 @@ class ExperimentRunner:
         config.client.delay = float(self.study_config.execution.retry_delay_seconds)
         config.client.timeout = float(self.study_config.execution.request_timeout_seconds)
         config.client.max_input_tokens = int(self.study_config.budget.max_input_tokens_per_call)
+        config.client.prompt_policy = str(self.study_config.execution.prompt_policy)
+        config.eval.max_episode_attempts = int(self.study_config.execution.max_episode_attempts)
+        config.eval.recovery_reserve_usd = float(self.study_config.budget.recovery_reserve_usd)
         config.eval.num_workers = 1
-        config.eval.max_steps_per_episode = self._step_limit(spec["benchmark"])
+        config.eval.max_steps_per_episode = self._step_limit(spec["benchmark"], spec["agent"])
         config.envs.names = spec["benchmark"]
         config.envs.env_kwargs.seed = spec["seed"]
         if spec["benchmark"] == "crafter":
@@ -276,6 +247,7 @@ class ExperimentRunner:
             "environment": OmegaConf.to_container(config.envs, resolve=True),
             "evaluation": OmegaConf.to_container(config.eval, resolve=True),
             "source_commit": self.source_commit,
+            "budget_policy": OmegaConf.to_container(self.study_config.budget, resolve=True),
             "source_files": self.source_files,
             "runtime_versions": self.runtime_versions,
             "local_model_snapshot": (os.environ.get("ASSIGNMENT2_QWEN_SNAPSHOT")
@@ -297,6 +269,9 @@ class ExperimentRunner:
         return None
 
     def _next_attempt_path(self, episode_key):
+        attempts = list(self.episodes_directory.glob(f"{episode_key}_attempt-*.json"))
+        if len(attempts) >= int(self.study_config.execution.max_episode_attempts):
+            raise IncompletePhaseError("Episode attempt limit reached; preserve evidence and review recovery manually.")
         return next_attempt_path(self.episodes_directory, episode_key)
 
     def _api_ledger_path(self):
@@ -345,6 +320,7 @@ class ExperimentRunner:
                 "client": OmegaConf.to_container(config.client, resolve=True),
                 "environment": OmegaConf.to_container(config.envs, resolve=True),
                 "evaluation": OmegaConf.to_container(config.eval, resolve=True),
+                "budget": OmegaConf.to_container(self.study_config.budget, resolve=True),
             },
             "steps": [],
             "usage": {"provider_actual_cost_usd": None},
@@ -488,6 +464,21 @@ class ExperimentRunner:
             expected.append({field: header[field] for field in
                              ["episode_key", "config_fingerprint", "spec", "effective_config", "model_profile",
                               "source_commit", "source_files", "runtime_versions", "local_model_snapshot"]})
+        paid = any(self.study_config.models[name].client_name == "openai" for name in self.model_names)
+        if paid:
+            pending = [item for item in expected if item["model_profile"]["client_name"] == "openai"
+                       and not self._matching_completed_record(item)]
+            calls = sum(logical_call_bound(self.study_config, self.phase, item["spec"]) for item in pending)
+            if self.phase == "smoke":
+                calls += sum(logical_call_bound(self.study_config, "final", spec)
+                             for spec in planned_episodes(self.study_config, "final", ["openai_mini"]))
+            required = calls * cost_per_logical_call(self.study_config)
+            available = (self.run_ledger.ceiling_usd - self.run_ledger.estimated_spent_usd
+                         - self.run_ledger.reserved_usd - float(self.study_config.budget.recovery_reserve_usd))
+            print(f"Paid preflight: remaining logical calls<={calls}, maximum new cost=${required:.6f}, "
+                  f"available excluding recovery reserve=${available:.6f}")
+            if required > available:
+                raise IncompletePhaseError("Remaining paid plan does not fit with the $1 recovery reserve; no requests made.")
         manifest = {
             "run_id": self.run_id,
             "phase": self.phase,
@@ -502,6 +493,7 @@ class ExperimentRunner:
             "study_config": OmegaConf.to_container(self.study_config, resolve=True),
             "execution_note": "One worker only. Existing complete, compatible episodes are skipped on resume.",
             "api_budget_ledger_path": str(self.api_ledger_path),
+            "planned_budget": planned_budget(self.study_config, self.run_ledger.estimated_spent_usd, self.run_ledger.reserved_usd),
         }
         manifest_path = self.run_directory / "manifest.json"
         if manifest_path.exists():

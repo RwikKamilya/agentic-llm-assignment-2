@@ -216,17 +216,14 @@ class OpenAIWrapper(LLMClientWrapper):
         self.last_retry_errors = []
         self.last_attempt_usage = []
         if self.max_input_tokens is not None:
-            bound = 32
-            for message in messages:
-                if message.attachment is not None:
-                    raise FatalClientError("The bounded Assignment 2 client requires text-only messages.")
-                bound += len(message.content.encode("utf-8")) + len(message.role.encode("utf-8")) + 32
+            from assignment2.prompts import input_token_upper_bound
+            bound = input_token_upper_bound(messages)
             if bound > int(self.max_input_tokens):
                 raise FatalClientError(f"Conservative input bound {bound} exceeds {self.max_input_tokens} tokens.")
             if not 1 <= int(self.max_retries) <= 2:
                 raise FatalClientError("Assignment 2 permits at most two total attempts.")
-            if not 1 <= int(self.client_kwargs.get("max_tokens", 0)) <= 384:
-                raise FatalClientError("Assignment 2 output bound is 384 tokens.")
+            if not 1 <= int(self.client_kwargs.get("max_tokens", 0)) <= 256:
+                raise FatalClientError("Assignment 2 output bound is 256 tokens.")
         self._initialize_client()
 
     def convert_messages(self, messages):

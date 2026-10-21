@@ -56,7 +56,7 @@ HF_HUB_OFFLINE=1 TRANSFORMERS_OFFLINE=1 "$SERVE_PYTHON" -m vllm.entrypoints.open
   --host 127.0.0.1 \
   --port "$PORT" \
   --gpu-memory-utilization 0.90 \
-  --max-model-len 8576 \
+  --max-model-len 4352 \
   >"$LOG_DIRECTORY/vllm.log" 2>&1 &
 echo $! >"$LOG_DIRECTORY/vllm.pid"
 echo "Started vLLM PID $(cat "$LOG_DIRECTORY/vllm.pid"). Log: $LOG_DIRECTORY/vllm.log"

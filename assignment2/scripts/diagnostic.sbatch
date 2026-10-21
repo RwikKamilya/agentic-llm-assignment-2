@@ -14,6 +14,7 @@ set -euo pipefail
 cd "$ASS2_ROOT/repo"
 EVAL_PYTHON="$ASS2_ROOT/envs/balrog-prebuilt/bin/python"
 SERVE_PYTHON="$ASS2_ROOT/envs/vllm-prebuilt/bin/python"
+export PYTHONUNBUFFERED=1
 export TMPDIR="$ASS2_ROOT/tmp/runtime-$SLURM_JOB_ID"
 export PIP_CACHE_DIR="$ASS2_ROOT/cache/pip"
 export XDG_CACHE_HOME="$ASS2_ROOT/cache/xdg"
@@ -58,19 +59,52 @@ print('OPENAI_API_KEY', 'present' if os.environ.get('OPENAI_API_KEY') else 'abse
 from assignment2.runner import source_provenance
 print('source_provenance', source_provenance('.'))
 from omegaconf import OmegaConf
-from balrog.environments.babyai_text.babyai_env import make_babyai_env
-from balrog.environments.crafter.crafter_env import make_crafter_env
+from balrog.environments import make_env
+from balrog.prompt_builder.history import HistoryPromptBuilder
+from assignment2.agents import LLMResponse, LoggedNaiveAgent, PlanningAgent, ReflectivePlanningAgent
+from assignment2.prompts import input_token_upper_bound
 config = OmegaConf.load('balrog/config/config.yaml')
-# Reset/close checks construct observations; no agent, action, or episode is run.
-for benchmark, factory, task in [
-    ('babyai', make_babyai_env, 'BabyAI-MixedTrainLocal-v0/goto'),
-    ('crafter', make_crafter_env, 'default'),
-]:
-    environment = factory(benchmark, task, config)
+study = OmegaConf.load('assignment2/config/experiment.yaml')
+for key, value in study.agent.items():
+    config.agent[key] = value
+classes = {'naive': LoggedNaiveAgent, 'planning': PlanningAgent,
+           'reflective_planning': ReflectivePlanningAgent}
+class OfflineClient:
+    max_input_tokens = 4096
+    def __init__(self):
+        self.bounds = []
+    def generate(self, messages):
+        bound = input_token_upper_bound(messages)
+        assert bound <= 4096
+        self.bounds.append(bound)
+        if 'You are a critic' in messages[-1].content:
+            reply = 'LESSONS:\n- Inspect visible objects before moving.'
+        elif 'PLAN:' in messages[-1].content:
+            reply = 'PLAN: inspect\nSUBGOAL: approach object\nEXPECTED_OUTCOME: object nearby\nACTION: go forward'
+        else:
+            reply = 'go forward'
+        assert len(reply.encode('utf-8')) <= 256
+        return LLMResponse('offline-check', reply, 'stop', 100, 30, None)
+# Reset/close and prompt checks only. No environment.step or network calls.
+for benchmark, task in [('babyai', 'BabyAI-MixedTrainLocal-v0/goto'), ('crafter', 'default')]:
+    environment = make_env(benchmark, task, config)
     try:
         observation, info = environment.reset(seed=101 if benchmark == 'babyai' else None)
         assert isinstance(observation, dict) and 'text' in observation
+        instruction = environment.get_instruction_prompt(instructions=observation.get('mission'))
         print('BENCHMARK_RESET_OK', benchmark, 'actions=0')
+        for model in study.models:
+            for name, agent_class in classes.items():
+                builder = HistoryPromptBuilder(max_text_history=6, max_image_history=0, max_cot_history=0)
+                builder.update_instruction_prompt(instruction)
+                client = OfflineClient()
+                agent = agent_class(lambda: client, builder, config)
+                for index in range(6):
+                    agent.act(observation, prev_action='go forward' if index else None)
+                if name == 'reflective_planning':
+                    assert agent.last_trace[4]['reflection']['parse']['valid']
+                print('PROMPT_CHECK_OK', benchmark, model, name, 'max_input_bound', max(client.bounds),
+                      'output_limit', 256, 'network_requests=0')
     finally:
         environment.close()
 import matplotlib
@@ -115,6 +149,8 @@ import os
 from pathlib import Path
 from collections import Counter
 from assignment2.validation import validate_run_directory, IncompletePhaseError
+from assignment2.experiment_plan import planned_budget
+from omegaconf import OmegaConf
 path = Path(os.environ['ASS2_ROOT'])/'results/api_spending_ledger.json'
 if path.exists():
     state = json.loads(path.read_text())
@@ -127,6 +163,9 @@ if path.exists():
     assert state['reserved_usd'] == 0
     assert all(call['estimated_cost_usd'] >= 0 for call in state['calls'])
     assert abs(sum(call['estimated_cost_usd'] for call in state['calls']) - state['estimated_spent_usd']) < 1e-10
+    budget = planned_budget(OmegaConf.load('assignment2/config/experiment.yaml'), state['estimated_spent_usd'], state['reserved_usd'])
+    print('BUDGET_PLAN', json.dumps(budget, sort_keys=True))
+    assert budget['fits_with_recovery_reserve']
     print('historical_call_roles', dict(Counter(call.get('role') for call in state['calls'])))
     if state['ceiling_usd'] == 10:
         (Path(os.environ['TMPDIR'])/'ledger-before-migration.json').write_bytes(path.read_bytes())
@@ -158,12 +197,12 @@ before = json.loads(backup.read_text())
 original = Path(os.environ['TMPDIR'])/'ledger-before-migration.json'
 if original.exists():
     assert backup.read_bytes() == original.read_bytes(), 'Backup differs from original bytes'
-assert before['ceiling_usd'] == 10 and state['ceiling_usd'] == 60
+assert before['ceiling_usd'] in {10, 15, 60} and state['ceiling_usd'] == 15
 for field in ['calls', 'estimated_spent_usd', 'reserved_usd']:
     assert before[field] == state[field], f'Migration changed historical {field}'
 print('LEDGER_MIGRATION_VERIFIED', 'backup', backup, 'calls', len(state['calls']),
       'spent_usd', state['estimated_spent_usd'], 'reserved_usd', state['reserved_usd'],
-      'remaining_usd', 60 - state['estimated_spent_usd'] - state['reserved_usd'])
+      'remaining_usd', 15 - state['estimated_spent_usd'] - state['reserved_usd'])
 PY
 "$EVAL_PYTHON" -m pip check
 "$SERVE_PYTHON" -m pip check

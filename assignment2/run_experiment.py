@@ -25,7 +25,7 @@ def main():
         default=None,
         help="New persistent result directory. It must not already exist and cannot be combined with --resume.",
     )
-    parser.add_argument("--models", nargs="+", default=None, help="Optional named model profiles from the manifest.")
+    parser.add_argument("--models", nargs=1, required=True, help="One named profile; launch Qwen independently of OpenAI.")
     arguments = parser.parse_args()
     if arguments.resume and arguments.run_directory:
         parser.error("--resume and --run-directory cannot be used together.")

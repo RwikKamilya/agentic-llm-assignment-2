@@ -166,7 +166,7 @@ class BudgetLedger:
         return CallReservation(role=role, upper_bound_usd=upper_bound, max_attempts=max_attempts)
 
     def record(self, reservation, input_tokens, output_tokens, status, attempts=1, retry_errors=None,
-               attempt_usage=None, provider=None, model_id=None):
+               attempt_usage=None, provider=None, model_id=None, prompt_metadata=None):
         attempts = int(attempts)
         if not 0 <= attempts <= reservation.max_attempts:
             raise RuntimeError("Client exceeded its reserved attempt bound.")
@@ -212,6 +212,7 @@ class BudgetLedger:
             "estimated_cost_usd": estimate,
             "reserved_upper_bound_usd": reservation.upper_bound_usd,
             "provider_actual_cost_usd": None,
+            "prompt": dict(prompt_metadata or {}),
         }
         self.calls.append(call)
         self._persist()

@@ -134,8 +134,8 @@ def summary_rows(records):
                     benchmark, "Read the environment implementation."
                 ),
                 "evaluation_step_limit": step_limit,
-                "evaluation_setting": ("250-step evaluation; not a reproduction of the original 1000-step setting"
-                                       if benchmark == "crafter" and step_limit == 250
+                "evaluation_setting": ("128-step evaluation; not a reproduction of the original 1000-step setting"
+                                       if benchmark == "crafter" and step_limit == 128
                                        else f"{step_limit}-step evaluation" if step_limit else "Historical limit unavailable"),
             }
         )

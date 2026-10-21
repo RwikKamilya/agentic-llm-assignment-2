@@ -52,6 +52,8 @@ def completed_record_problems(record, expected, phase):
             reflections += 1
             if not reflection.get("raw_response") or not reflection.get("call"):
                 problems.append("missing critic trace")
+            if not reflection.get("parse", {}).get("valid"):
+                problems.append("invalid critic response format")
     if reflections != expected_critics:
         problems.append("persisted critic traces do not match calls")
     if not usable:
@@ -66,9 +68,9 @@ def completed_record_problems(record, expected, phase):
             problems.append("OpenAI token usage was not recorded")
         if paid and call.get("provider") != "openai":
             problems.append("OpenAI call missing paid provider identity")
-        if paid and (call.get("input_tokens", 0) or 0) > 8192:
+        if paid and (call.get("input_tokens", 0) or 0) > expected["effective_config"]["client"]["max_input_tokens"]:
             problems.append("reported input tokens exceed enforced bound")
-        if (call.get("output_tokens", 0) or 0) > 384:
+        if (call.get("output_tokens", 0) or 0) > expected["effective_config"]["client"]["generate_kwargs"]["max_tokens"]:
             problems.append("reported output tokens exceed bound")
         if str(call.get("status", "")).startswith(("error", "exception")):
             problems.append("failed call in completed episode")

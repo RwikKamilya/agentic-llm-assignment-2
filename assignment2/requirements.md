@@ -31,7 +31,7 @@ future real runs.
   state for each episode. This is *Reflexion-inspired within-episode
   reflection*, not a reproduction of Reflexion's cross-trial episodic memory.
 - **Benchmarks:** BabyAI uses BALROG's binary mission progression. Crafter
-  uses its final count of achievements divided by 22, with a 250-step evaluation (not a reproduction of the original 1000-step setting). They are reported in
+  uses its final count of achievements divided by 22, with a 128-step evaluation (not a reproduction of the original 1000-step setting). They are reported in
   separate rows and are never averaged together.
 - **Comparison:** ten matched task/seed episodes are planned per
   model × benchmark × agent final cell. The small fixed-seed repeat subset
