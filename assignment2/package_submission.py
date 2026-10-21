@@ -23,18 +23,22 @@ def included_paths(exercise):
         "assignment2/analysis.py",
         "assignment2/run_experiment.py",
         "assignment2/storage.py",
+        "assignment2/agents.py",
+        "assignment2/validation.py",
+        "assignment2/migrate_budget.py",
+        "assignment2/audit_results.py",
         "assignment2/scripts/inspect_remote.sh",
         "assignment2/scripts/check_python_environments.sh",
         "assignment2/scripts/setup.sbatch",
+        "assignment2/scripts/diagnostic.sbatch",
         "assignment2/scripts/run_pipeline.sbatch",
         "assignment2/scripts/start_vllm.sh",
         "assignment2/scripts/stop_vllm.sh",
         "balrog/config/config.yaml",
         "balrog/agents/__init__.py",
         "balrog/client.py",
+        "balrog/environments/babyai_text/babyai_env.py",
     ]
-    if exercise >= 2:
-        common.append("assignment2/agents.py")
     if exercise == 1:
         common.append("balrog/agents/naive.py")
     return [ROOT / relative_path for relative_path in common]

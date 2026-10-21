@@ -5,12 +5,15 @@ time. It never fills missing or failed episodes with zero progression.
 """
 
 import argparse
+import copy
 import csv
 import json
 import math
 import random
 from collections import defaultdict
 from pathlib import Path
+
+from assignment2.validation import validate_run_directory
 
 
 PROGRESSION_DEFINITIONS = {
@@ -39,6 +42,7 @@ def load_records(input_directories, expected_data_kind=None):
     """Load episode JSON records and reject accidental phase/synthetic mixing."""
     records = []
     data_kinds = set()
+    completed_identities = set()
     for directory in input_directories:
         for path in Path(directory).glob("episodes/*.json"):
             try:
@@ -46,6 +50,11 @@ def load_records(input_directories, expected_data_kind=None):
             except json.JSONDecodeError as error:
                 raise ValueError(f"Unreadable JSON record: {path}") from error
             record["_path"] = str(path)
+            if record.get("status") == "completed" and record.get("episode_key"):
+                identity = record["episode_key"]
+                if identity in completed_identities:
+                    raise ValueError(f"Duplicate completed episode identity: {identity}")
+                completed_identities.add(identity)
             kind = record.get("data_kind")
             if kind:
                 data_kinds.add(kind)
@@ -83,6 +92,7 @@ def summary_rows(records):
 
     rows = []
     for (model, benchmark, agent), items in sorted(grouped.items()):
+        step_limit = items[0].get("effective_config", {}).get("evaluation", {}).get("max_steps_per_episode")
         progressions = [item["outcome"].get("progression") for item in items]
         progressions = [value for value in progressions if isinstance(value, (int, float))]
         successes = [item["outcome"].get("success") for item in items if item["outcome"].get("success") is not None]
@@ -123,6 +133,10 @@ def summary_rows(records):
                 "progression_definition": PROGRESSION_DEFINITIONS.get(
                     benchmark, "Read the environment implementation."
                 ),
+                "evaluation_step_limit": step_limit,
+                "evaluation_setting": ("250-step evaluation; not a reproduction of the original 1000-step setting"
+                                       if benchmark == "crafter" and step_limit == 250
+                                       else f"{step_limit}-step evaluation" if step_limit else "Historical limit unavailable"),
             }
         )
     return rows
@@ -294,7 +308,32 @@ def main():
     parser.add_argument("--phase", choices=["development", "pilot", "final"], required=True)
     parser.add_argument("--output", required=True)
     arguments = parser.parse_args()
+    for directory in arguments.runs:
+        validate_run_directory(directory)
     records, _ = load_records(arguments.runs, expected_data_kind=arguments.phase)
+    settings = set()
+    benchmark_settings = {}
+    model_settings = {}
+    for record in completed_records(records):
+        effective = record.get("effective_config", {})
+        settings.add(json.dumps({"source": record.get("source_files"),
+                                "runtime_versions": record.get("runtime_versions"), "agent": {
+            key: value for key, value in effective.get("agent", {}).items() if key != "type"}}, sort_keys=True))
+        environment = copy.deepcopy(effective["environment"])
+        environment["env_kwargs"].pop("seed", None)
+        environment["crafter_kwargs"].pop("seed", None)
+        benchmark_key = record["spec"]["benchmark"]
+        benchmark_value = {"environment": environment, "evaluation": effective["evaluation"]}
+        if benchmark_key in benchmark_settings and benchmark_settings[benchmark_key] != benchmark_value:
+            raise ValueError("Analysis refuses to mix environment settings or step limits within a benchmark.")
+        benchmark_settings[benchmark_key] = benchmark_value
+        model_key = record["spec"]["model"]
+        model_value = {"profile": record["model_profile"], "snapshot": record.get("local_model_snapshot")}
+        if model_key in model_settings and model_settings[model_key] != model_value:
+            raise ValueError("Analysis refuses to mix profiles or snapshots within a model.")
+        model_settings[model_key] = model_value
+    if len(settings) != 1:
+        raise ValueError("Analysis refuses to mix source versions or prompt/history settings.")
     output = Path(arguments.output)
     rows = summary_rows(records)
     paired = paired_differences(records, "planning", "naive")

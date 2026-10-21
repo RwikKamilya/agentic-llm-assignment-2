@@ -31,6 +31,10 @@ httpx_logger.setLevel(logging.WARNING)
 logger = logging.getLogger(__name__)
 
 
+class FatalClientError(ValueError):
+    """Authentication, request configuration, or enforced token bound failure."""
+
+
 class LLMClientWrapper:
     """Base class for LLM client wrappers.
 
@@ -55,6 +59,8 @@ class LLMClientWrapper:
         self.alternate_roles = client_config.alternate_roles
         self.last_call_attempts = 0
         self.last_retry_errors = []
+        self.last_attempt_usage = []
+        self.max_input_tokens = client_config.get("max_input_tokens", None)
 
     def generate(self, messages):
         """Generate a response from the LLM given a list of messages.
@@ -86,17 +92,32 @@ class LLMClientWrapper:
         retries = 0
         self.last_call_attempts = 0
         self.last_retry_errors = []
+        self.last_attempt_usage = []
         while retries < self.max_retries:
             try:
                 self.last_call_attempts += 1
-                return func(*args, **kwargs)
+                result = func(*args, **kwargs)
+                usage = getattr(result, "usage", None)
+                self.last_attempt_usage.append({
+                    "input_tokens": getattr(usage, "prompt_tokens", None),
+                    "output_tokens": getattr(usage, "completion_tokens", None),
+                })
+                return result
             except Exception as e:
                 retries += 1
-                self.last_retry_errors.append(f"{type(e).__name__}: {e}")
-                logger.error(f"Retryable error during {func.__name__}: {e}. Retry {retries}/{self.max_retries}")
-                sleep_time = self.delay * (2 ** (retries - 1))  # Exponential backoff
-                time.sleep(sleep_time)
-        raise Exception(f"Failed to execute {func.__name__} after {self.max_retries} retries.")
+                self.last_attempt_usage.append({"input_tokens": None, "output_tokens": None})
+                status = getattr(e, "status_code", None)
+                # Exception bodies can echo headers or credential-bearing URLs.
+                self.last_retry_errors.append(f"{type(e).__name__} (HTTP {status})")
+                if isinstance(e, InterruptedError):
+                    raise
+                if status in {400, 401, 403, 404, 405, 422} or getattr(e, "code", None) == "insufficient_quota":
+                    raise FatalClientError(f"Provider rejected authentication/configuration (HTTP {status}).") from e
+                if isinstance(e, (FatalClientError, ValueError, TypeError)):
+                    raise FatalClientError(f"Invalid client request: {type(e).__name__}") from e
+                if retries < self.max_retries:
+                    time.sleep(self.delay * (2 ** (retries - 1)))
+        raise RuntimeError(f"Model request failed after {self.last_call_attempts} total attempts.")
 
 
 def process_image_openai(image):
@@ -170,15 +191,43 @@ class OpenAIWrapper(LLMClientWrapper):
         """Initialize the OpenAI client if not already initialized."""
         if not self._initialized:
             if self.client_name.lower() == "vllm":
-                self.client = OpenAI(api_key="EMPTY", base_url=self.base_url)
+                self.client = OpenAI(api_key="EMPTY", base_url=self.base_url, timeout=self.timeout, max_retries=0)
             elif self.client_name.lower() == "nvidia" or self.client_name.lower() == "xai":
                 if not self.base_url or not self.base_url.strip():
                     raise ValueError("base_url must be provided when using NVIDIA or XAI client")
                 self.client = OpenAI(base_url=self.base_url)
             elif self.client_name.lower() == "openai":
-                # For OpenAI, always use the standard API regardless of base_url
-                self.client = OpenAI()
+                key = os.environ.get("OPENAI_API_KEY")
+                if not key:
+                    raise FatalClientError("OPENAI_API_KEY is required for OpenAI.")
+                # Explicit URL also overrides an inherited OPENAI_BASE_URL.
+                self.client = OpenAI(api_key=key, base_url="https://api.openai.com/v1",
+                                     timeout=self.timeout, max_retries=0)
             self._initialized = True
+
+    def validate_request(self, messages):
+        """Bound text conservatively before reservation or any network request.
+
+        UTF-8 bytes upper-bound byte-pair text tokens. Extra per-message and
+        reply padding covers role/chat framing. Reject instead of truncating
+        observations or changing prompts between the two experimental models.
+        """
+        self.last_call_attempts = 0
+        self.last_retry_errors = []
+        self.last_attempt_usage = []
+        if self.max_input_tokens is not None:
+            bound = 32
+            for message in messages:
+                if message.attachment is not None:
+                    raise FatalClientError("The bounded Assignment 2 client requires text-only messages.")
+                bound += len(message.content.encode("utf-8")) + len(message.role.encode("utf-8")) + 32
+            if bound > int(self.max_input_tokens):
+                raise FatalClientError(f"Conservative input bound {bound} exceeds {self.max_input_tokens} tokens.")
+            if not 1 <= int(self.max_retries) <= 2:
+                raise FatalClientError("Assignment 2 permits at most two total attempts.")
+            if not 1 <= int(self.client_kwargs.get("max_tokens", 0)) <= 384:
+                raise FatalClientError("Assignment 2 output bound is 384 tokens.")
+        self._initialize_client()
 
     def convert_messages(self, messages):
         """Convert messages to the format expected by the OpenAI API.
@@ -209,7 +258,7 @@ class OpenAIWrapper(LLMClientWrapper):
         Returns:
             LLMResponse: The response from the OpenAI API.
         """
-        self._initialize_client()
+        self.validate_request(messages)
         converted_messages = self.convert_messages(messages)
 
         def api_call():
@@ -224,32 +273,23 @@ class OpenAIWrapper(LLMClientWrapper):
             if temperature is not None:
                 api_kwargs["temperature"] = temperature
 
-            response = self.client.chat.completions.create(**api_kwargs)
+            return self.client.chat.completions.create(**api_kwargs)
 
-            if response is None:
-                raise RuntimeError("LLM response is None")
-
-            if not getattr(response, "choices", None):
-                raise RuntimeError(f"Missing choices in response: {response!r}")
-
-            msg = getattr(response.choices[0], "message", None)
-            if msg is None:
-                raise RuntimeError(f"Missing message in response: {response!r}")
-
-            content = getattr(msg, "content", None)
-            if not content:
-                raise RuntimeError(f"Empty content in response: {response!r}")
-
-            return response, content.strip()
-
-        response, completion = self.execute_with_retries(api_call)
+        # Parse after the request retry loop: a malformed paid response must
+        # retain its reported usage and must not trigger a second paid request.
+        response = self.execute_with_retries(api_call)
+        choices = getattr(response, "choices", None)
+        message = getattr(choices[0], "message", None) if choices else None
+        content = getattr(message, "content", None)
+        usage = getattr(response, "usage", None)
+        valid = isinstance(content, str) and bool(content.strip())
 
         return LLMResponse(
             model_id=self.model_id,
-            completion=completion,
-            stop_reason=response.choices[0].finish_reason,
-            input_tokens=response.usage.prompt_tokens,
-            output_tokens=response.usage.completion_tokens,
+            completion=content.strip() if valid else "",
+            stop_reason=choices[0].finish_reason if valid else "error_empty_response",
+            input_tokens=getattr(usage, "prompt_tokens", None),
+            output_tokens=getattr(usage, "completion_tokens", None),
             reasoning=None,
         )
 

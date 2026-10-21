@@ -12,6 +12,7 @@
 
 set -euo pipefail
 SECONDS=0
+trap 'exit_code=$?; echo "ASSIGNMENT2_JOB_EXIT exit_code=$exit_code"' EXIT
 
 ASS2_ROOT="${ASS2_ROOT:?Set ASS2_ROOT=/data/s4822285/assignment2 before submission.}"
 if [[ "$ASS2_ROOT" != "/data/s4822285/assignment2" ]]; then
@@ -24,8 +25,8 @@ if [[ -z "${SLURM_JOB_ID:-}" ]]; then
 fi
 
 REPO_ROOT="$ASS2_ROOT/repo"
-EVAL_PYTHON="$ASS2_ROOT/envs/balrog/bin/python"
-SERVE_PYTHON="$ASS2_ROOT/envs/vllm/bin/python"
+EVAL_PYTHON="$ASS2_ROOT/envs/balrog-prebuilt/bin/python"
+SERVE_PYTHON="$ASS2_ROOT/envs/vllm-prebuilt/bin/python"
 CACHE_ROOT="$ASS2_ROOT/cache"
 MODEL_CACHE="$CACHE_ROOT/models"
 PACKAGE_CACHE="$CACHE_ROOT/pip"
@@ -49,6 +50,7 @@ if [[ "$PHASE" != "smoke" && "$PHASE" != "pilot" && "$PHASE" != "final" ]]; then
   exit 1
 fi
 read -r -a MODEL_ARGS <<< "$MODELS"
+MODELS="${MODEL_ARGS[*]}"
 if (( ${#MODEL_ARGS[@]} == 0 )); then
   echo "ASS2_MODELS must name at least one model profile." >&2
   exit 1
@@ -57,7 +59,7 @@ if [[ ! "$MIN_FREE_GB" =~ ^[1-9][0-9]*$ ]] || [[ ! "$CLEANUP_RESERVE_MINUTES" =~
   echo "ASS2_MIN_FREE_GB and ASS2_CLEANUP_RESERVE_MINUTES must be positive integers." >&2
   exit 1
 fi
-if [[ ! -x "$EVAL_PYTHON" || ! -x "$SERVE_PYTHON" ]]; then
+if [[ ! -x "$EVAL_PYTHON" ]]; then
   echo "Setup environments are missing. Submit assignment2/scripts/setup.sbatch first." >&2
   exit 1
 fi
@@ -85,8 +87,10 @@ if ! command -v timeout >/dev/null 2>&1; then
   exit 1
 fi
 
+export TMPDIR="$ASS2_ROOT/tmp/runtime-$SLURM_JOB_ID"
+mkdir -p "$TMPDIR"
+export PATH="$(dirname "$EVAL_PYTHON"):$PATH"
 export PIP_CACHE_DIR="$PACKAGE_CACHE"
-export HOME="$ASS2_ROOT/home"
 export XDG_CACHE_HOME="$CACHE_ROOT/xdg"
 export HF_HOME="$MODEL_CACHE/huggingface"
 export HF_HUB_CACHE="$HF_HOME/hub"
@@ -101,13 +105,24 @@ export ASSIGNMENT2_OUTPUT_ROOT="$RESULTS_ROOT"
 export ASSIGNMENT2_BUDGET_LEDGER_PATH="$RESULTS_ROOT/api_spending_ledger.json"
 export ASSIGNMENT2_EVAL_PYTHON="$EVAL_PYTHON"
 export ASSIGNMENT2_SERVE_PYTHON="$SERVE_PYTHON"
-mkdir -p "$HOME" "$XDG_CACHE_HOME" "$HF_HOME" "$VLLM_CACHE_ROOT" "$TORCH_HOME" "$TRITON_CACHE_DIR"
+mkdir -p "$XDG_CACHE_HOME"
 
 cd "$REPO_ROOT"
-"$REPO_ROOT/assignment2/scripts/check_python_environments.sh" "$EVAL_PYTHON" "$SERVE_PYTHON"
-MODEL_ID="$("$EVAL_PYTHON" -c 'import sys; from omegaconf import OmegaConf; config = OmegaConf.load(sys.argv[1]); assert float(config.budget.total_ceiling_usd) == 10.0; print(config.models.qwen_7b_local.model_id)' "$REPO_ROOT/assignment2/config/experiment.yaml")"
-export MODEL_ID
-"$SERVE_PYTHON" -c '
+for model_name in "${MODEL_ARGS[@]}"; do
+  case "$model_name" in
+    openai_mini|qwen_7b_local) ;;
+    *) echo "Unknown model profile: $model_name" >&2; exit 1 ;;
+  esac
+done
+if [[ " $MODELS " == *" openai_mini "* && -z "${OPENAI_API_KEY:-}" ]]; then
+  echo "OPENAI_API_KEY must be set in the submitting environment." >&2
+  exit 1
+fi
+if [[ " $MODELS " == *" qwen_7b_local "* ]]; then
+  "$REPO_ROOT/assignment2/scripts/check_python_environments.sh" "$EVAL_PYTHON" "$SERVE_PYTHON"
+  MODEL_ID="$("$EVAL_PYTHON" -c 'import sys; from omegaconf import OmegaConf; config = OmegaConf.load(sys.argv[1]); print(config.models.qwen_7b_local.model_id)' "$REPO_ROOT/assignment2/config/experiment.yaml")"
+  export MODEL_ID
+  QWEN_SNAPSHOT="$("$SERVE_PYTHON" -c '
 import sys
 from pathlib import Path
 from huggingface_hub import snapshot_download
@@ -116,8 +131,13 @@ model_id, cache_dir = sys.argv[1:]
 snapshot = Path(snapshot_download(repo_id=model_id, cache_dir=cache_dir, local_files_only=True))
 if not (snapshot / "config.json").is_file():
     raise RuntimeError(f"Prepared model snapshot has no config.json: {snapshot}")
-print(f"Using prepared model snapshot: {snapshot}")
-' "$MODEL_ID" "$HF_HUB_CACHE"
+print(snapshot)
+' "$MODEL_ID" "$HF_HUB_CACHE")"
+  export ASSIGNMENT2_QWEN_SNAPSHOT="$QWEN_SNAPSHOT"
+  echo "Using prepared model snapshot: $QWEN_SNAPSHOT"
+else
+  "$REPO_ROOT/assignment2/scripts/check_python_environments.sh" "$EVAL_PYTHON"
+fi
 
 if [[ -n "$RESUME_DIRECTORY" ]]; then
   RUN_DIRECTORY="$RESUME_DIRECTORY"
@@ -134,41 +154,48 @@ case "$RUN_DIRECTORY" in
 esac
 
 SERVER_STARTED=0
-CLOUD_LOCK_HELD=0
-BUDGET_LOCK_DIRECTORY="$RESULTS_ROOT/api_spending_ledger.lock"
 cleanup() {
+  local exit_code=$?
+  trap - EXIT
   if [[ "$SERVER_STARTED" == "1" ]]; then
-    "$REPO_ROOT/assignment2/scripts/stop_vllm.sh" || true
+    if ! "$REPO_ROOT/assignment2/scripts/stop_vllm.sh"; then
+      echo "vLLM cleanup failed." >&2
+      exit_code=1
+    fi
   fi
-  if [[ "$CLOUD_LOCK_HELD" == "1" ]]; then
-    rm -f "$BUDGET_LOCK_DIRECTORY/owner"
-    rmdir "$BUDGET_LOCK_DIRECTORY" || true
-  fi
+  printf 'job_id=%s\nphase=%s\nexit_code=%s\n' "$SLURM_JOB_ID" "$PHASE" "$exit_code" \
+    > "$ASS2_ROOT/logs/run-$SLURM_JOB_ID.status"
+  echo "ASSIGNMENT2_JOB_EXIT exit_code=$exit_code"
+  exit "$exit_code"
 }
 trap cleanup EXIT
+trap 'exit 143' TERM
+trap 'exit 130' INT
 
-if [[ " $MODELS " == *" gemini_flash_lite "* ]]; then
-  if ! mkdir "$BUDGET_LOCK_DIRECTORY" 2>/dev/null; then
-    echo "Another cloud-evaluation job appears to hold $BUDGET_LOCK_DIRECTORY. Do not run Gemini jobs concurrently." >&2
-    exit 1
-  fi
-  CLOUD_LOCK_HELD=1
-  printf 'slurm_job_id=%s\n' "$SLURM_JOB_ID" > "$BUDGET_LOCK_DIRECTORY/owner"
-fi
+# Python holds the exclusive paid-ledger lock for all cloud calls and resumes.
 
 if [[ " $MODELS " == *" qwen_7b_local "* ]]; then
   if ! command -v curl >/dev/null 2>&1; then
     echo "curl is required to check the local vLLM endpoint." >&2
     exit 1
   fi
+  if curl -fsS --max-time 5 http://127.0.0.1:8080/v1/models >/dev/null 2>&1; then
+    echo "Port 8080 already serves a model; refusing to reuse or disturb another server." >&2
+    exit 1
+  fi
   "$REPO_ROOT/assignment2/scripts/start_vllm.sh"
   SERVER_STARTED=1
-  for attempt in $(seq 1 30); do
-    if curl -fsS http://127.0.0.1:8080/v1/models >/dev/null; then
+  for attempt in $(seq 1 450); do
+    if ! kill -0 "$(cat "$LOG_DIRECTORY/vllm.pid")" 2>/dev/null; then
+      echo "The job's vLLM process exited; check $LOG_DIRECTORY/vllm.log" >&2
+      exit 1
+    fi
+    if curl -fsS --max-time 5 http://127.0.0.1:8080/v1/models > "$LOG_DIRECTORY/models.json" 2>/dev/null; then
+      "$EVAL_PYTHON" -c 'import json, sys; data = json.load(open(sys.argv[1])); assert sys.argv[2] in [item["id"] for item in data["data"]], "Unexpected model at local endpoint"' "$LOG_DIRECTORY/models.json" "$MODEL_ID"
       break
     fi
     sleep 2
-    if [[ "$attempt" == "30" ]]; then
+    if [[ "$attempt" == "450" ]]; then
       echo "vLLM did not become ready. Check $LOG_DIRECTORY/vllm.log" >&2
       exit 1
     fi
@@ -182,16 +209,18 @@ if (( AVAILABLE_EXPERIMENT_SECONDS <= 0 )); then
 fi
 echo "Evaluation is limited to ${AVAILABLE_EXPERIMENT_SECONDS}s; ${CLEANUP_RESERVE_MINUTES} minute(s) remain reserved for saving and cleanup."
 timeout --signal=TERM --kill-after="$TERMINATION_GRACE_SECONDS" "$AVAILABLE_EXPERIMENT_SECONDS" \
-  "$EVAL_PYTHON" assignment2/run_experiment.py --phase "$PHASE" "${RUN_ARGUMENTS[@]}" --models "${MODEL_ARGS[@]}"
+  "$EVAL_PYTHON" -u -m assignment2.run_experiment --phase "$PHASE" "${RUN_ARGUMENTS[@]}" --models "${MODEL_ARGS[@]}"
 
-if [[ "$PHASE" == "final" && " $MODELS " == *" gemini_flash_lite "* && " $MODELS " == *" qwen_7b_local "* ]]; then
+if [[ "$PHASE" == "final" && " $MODELS " == *" openai_mini "* && " $MODELS " == *" qwen_7b_local "* ]]; then
   AVAILABLE_ANALYSIS_SECONDS=$((JOB_TIME_LIMIT_SECONDS - CLEANUP_RESERVE_MINUTES * 60 - TERMINATION_GRACE_SECONDS - SECONDS))
   if (( AVAILABLE_ANALYSIS_SECONDS <= 0 )); then
     echo "No time remains for final analysis before the cleanup reserve." >&2
     exit 1
   fi
   timeout --signal=TERM --kill-after="$TERMINATION_GRACE_SECONDS" "$AVAILABLE_ANALYSIS_SECONDS" \
-    "$EVAL_PYTHON" assignment2/analysis.py "$RUN_DIRECTORY" --phase final --output "$RUN_DIRECTORY/analysis"
+    "$EVAL_PYTHON" -m assignment2.analysis "$RUN_DIRECTORY" --phase final --output "$RUN_DIRECTORY/analysis"
 else
   echo "Final combined analysis was not run: supply both model profiles in one final job, or combine result directories separately."
 fi
+
+echo "ASSIGNMENT2_PHASE_OK phase=$PHASE models=$MODELS run=$RUN_DIRECTORY"

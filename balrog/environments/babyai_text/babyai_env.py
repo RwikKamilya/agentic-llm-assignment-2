@@ -37,10 +37,18 @@ BABYAI_ENVS += [
 def make_babyai_env(env_name, task, config, render_mode: Optional[str] = None):
     if task.startswith("BabyAI-MixedTrainLocal-v0/"):
         base_task, goal = task.split("/")
-        while 1:
+        # The upstream level samples its instruction kind at construction.
+        # Bound rejection sampling and close rejected environments.
+        for attempt in range(100):
             env = gym.make(base_task, render_mode=render_mode, **config.envs.babyai_kwargs)
             if env.unwrapped.action_kinds[0].replace(" ", "_") == goal:
+                env.unwrapped.task_selection_attempts = attempt + 1
                 break
+            env.close()
+        else:
+            raise RuntimeError(f"Could not construct requested BabyAI instruction kind {goal!r} in 100 attempts.")
+    else:
+        env = gym.make(task, render_mode=render_mode, **config.envs.babyai_kwargs)
 
     env = BabyAITextCleanLangWrapper(env, **config.envs.babyai_kwargs)
 

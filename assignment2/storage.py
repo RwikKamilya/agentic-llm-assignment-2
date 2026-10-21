@@ -1,6 +1,7 @@
 """Small helpers for atomic episode records and compatible-resume checks."""
 
 import json
+import os
 import tempfile
 from pathlib import Path
 
@@ -21,10 +22,17 @@ def atomic_json_write(path, value):
     path = Path(path)
     path.parent.mkdir(parents=True, exist_ok=True)
     with tempfile.NamedTemporaryFile("w", encoding="utf-8", dir=path.parent, delete=False) as handle:
-        json.dump(_json_safe(value), handle, indent=2, sort_keys=True)
+        json.dump(_json_safe(value), handle, indent=2, sort_keys=True, allow_nan=False)
         handle.write("\n")
+        handle.flush()
+        os.fsync(handle.fileno())
         temporary_path = Path(handle.name)
     temporary_path.replace(path)
+    directory_fd = os.open(path.parent, os.O_RDONLY)
+    try:
+        os.fsync(directory_fd)
+    finally:
+        os.close(directory_fd)
 
 
 def matching_completed_record(episodes_directory, episode_key, config_fingerprint):

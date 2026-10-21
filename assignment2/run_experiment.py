@@ -2,11 +2,18 @@
 
 import argparse
 import os
+import signal
 from pathlib import Path
 
 from omegaconf import OmegaConf
 
 from assignment2.runner import ExperimentRunner
+from assignment2.validation import IncompletePhaseError
+
+
+def stop_requested(signum, frame):
+    # Let the runner save the partial episode and return a failure exit.
+    raise InterruptedError("Termination requested; saving incomplete evidence.")
 
 
 def main():
@@ -36,7 +43,12 @@ def main():
         run_directory=arguments.run_directory,
         model_names=arguments.models,
     )
-    runner.run()
+    signal.signal(signal.SIGTERM, stop_requested)
+    try:
+        runner.run()
+    except IncompletePhaseError as error:
+        print(f"Phase incomplete: {error}", flush=True)
+        raise SystemExit(1) from error
 
 
 if __name__ == "__main__":

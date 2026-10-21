@@ -14,6 +14,7 @@ fi
 nvidia-smi --query-gpu=name,memory.total --format=csv,noheader
 
 MODEL_ID="${MODEL_ID:-Qwen/Qwen2.5-7B-Instruct}"
+MODEL_PATH="${ASSIGNMENT2_QWEN_SNAPSHOT:-$MODEL_ID}"
 PORT="${PORT:-8080}"
 LOG_DIRECTORY="${ASSIGNMENT2_LOG_DIRECTORY:?Set ASSIGNMENT2_LOG_DIRECTORY to verified non-home storage.}"
 MODEL_CACHE="${ASSIGNMENT2_MODEL_CACHE:?Set ASSIGNMENT2_MODEL_CACHE to verified non-home storage.}"
@@ -31,6 +32,8 @@ if [[ ! -x "$SERVE_PYTHON" ]]; then
   exit 1
 fi
 
+# vLLM JIT compilation invokes executables such as ninja from this environment.
+export PATH="$(dirname "$SERVE_PYTHON"):$PATH"
 export HF_HOME="$MODEL_CACHE/huggingface"
 export HF_HUB_CACHE="$HF_HOME/hub"
 export HUGGINGFACE_HUB_CACHE="$HF_HOME/hub"
@@ -47,12 +50,13 @@ if [[ -f "$LOG_DIRECTORY/vllm.pid" ]] && kill -0 "$(cat "$LOG_DIRECTORY/vllm.pid
   exit 1
 fi
 
-"$SERVE_PYTHON" -m vllm.entrypoints.openai.api_server \
-  --model "$MODEL_ID" \
+HF_HUB_OFFLINE=1 TRANSFORMERS_OFFLINE=1 "$SERVE_PYTHON" -m vllm.entrypoints.openai.api_server \
+  --model "$MODEL_PATH" \
+  --served-model-name "$MODEL_ID" \
   --host 127.0.0.1 \
   --port "$PORT" \
   --gpu-memory-utilization 0.90 \
-  --max-model-len 8192 \
+  --max-model-len 8576 \
   >"$LOG_DIRECTORY/vllm.log" 2>&1 &
 echo $! >"$LOG_DIRECTORY/vllm.pid"
 echo "Started vLLM PID $(cat "$LOG_DIRECTORY/vllm.pid"). Log: $LOG_DIRECTORY/vllm.log"

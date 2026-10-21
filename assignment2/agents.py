@@ -103,6 +103,7 @@ class PlanningAgent(BaseAgent):
         self.lessons = []
         self.step_number = 0
         self.last_trace = []
+        self.call_trace = []
         self._recent_observations = []
         self._recent_actions = []
 
@@ -143,15 +144,20 @@ ACTION: <one valid game action>
     def _call_model(self, messages, role):
         reservation = None
         max_attempts = max(1, int(getattr(self.client, "max_retries", 1)))
+        if hasattr(self.client, "validate_request"):
+            self.client.validate_request(messages)
         if self.budget_ledger is not None:
             reservation = self.budget_ledger.reserve(role, max_attempts=max_attempts)
         try:
             response = self.client.generate(messages)
         except Exception as error:
+            call_log = None
             if reservation is not None:
-                attempts = max(1, int(getattr(self.client, "last_call_attempts", 1)))
-                self.budget_ledger.record(reservation, None, None, "exception", attempts=attempts)
-            raise ModelCallError(f"{role} call raised {type(error).__name__}: {error}") from error
+                attempts = int(getattr(self.client, "last_call_attempts", 1))
+                call_log = self._record_call(reservation, None, None, "exception", attempts)
+            self.call_trace.append({"role": role, "raw_response": None, "call": call_log,
+                                    "error": type(error).__name__})
+            raise ModelCallError(f"{role} call raised {type(error).__name__}") from error
 
         status = str(getattr(response, "stop_reason", "unknown"))
         input_tokens = getattr(response, "input_tokens", None)
@@ -161,14 +167,25 @@ ACTION: <one valid game action>
             # that did not expose usage, rather than a free model call.
             input_tokens = None
             output_tokens = None
-        attempts = max(1, int(getattr(self.client, "last_call_attempts", 1)))
+        attempts = int(getattr(self.client, "last_call_attempts", 1))
         call_log = None
         if reservation is not None:
-            call_log = self.budget_ledger.record(reservation, input_tokens, output_tokens, status, attempts=attempts)
-            call_log["retry_errors"] = list(getattr(self.client, "last_retry_errors", []))
+            call_log = self._record_call(reservation, input_tokens, output_tokens, status, attempts)
+        # Keep a critic response even if the following actor request fails.
+        self.call_trace.append({"role": role, "raw_response": response.completion,
+                                "stop_reason": status, "call": call_log})
         if status.startswith("error"):
             raise ModelCallError(f"{role} call stopped with {status}")
         return response, call_log
+
+    def _record_call(self, reservation, input_tokens, output_tokens, status, attempts):
+        return self.budget_ledger.record(
+            reservation, input_tokens, output_tokens, status, attempts=attempts,
+            retry_errors=getattr(self.client, "last_retry_errors", []),
+            attempt_usage=getattr(self.client, "last_attempt_usage", []),
+            provider=getattr(self.client, "client_name", None),
+            model_id=getattr(self.client, "model_id", None),
+        )
 
     def _maybe_reflect(self):
         """Hook for the reflective variant; plain planning performs no critic call."""

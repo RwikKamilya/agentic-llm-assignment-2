@@ -8,7 +8,7 @@ future real runs.
 |---|---|---|---|
 | Preparation: read BALROG, agents, evaluation, few-shot material | `RUNBOOK.md`, this map, and the preserved BALROG documentation | Installation and smoke-test notes | Methods / appendix |
 | Exercise 1.1: Ass2-1 archive and README | `package_submission.py` | Archive contents and README completed with actual commands | Appendix / submitted archive |
-| Exercise 1.2: LLMs and benchmarks tried, and why | Fixed Gemini and Qwen profiles in `config/experiment.yaml`; BabyAI and Crafter manifest | Availability, pilot feasibility, final model versions | Exercise 1 |
+| Exercise 1.2: LLMs and benchmarks tried, and why | Fixed OpenAI mini and Qwen profiles in `config/experiment.yaml`; BabyAI and Crafter manifest | Availability, pilot feasibility, final model versions | Exercise 1 |
 | Exercise 1.3: LLM x benchmark performance matrix and metric | `analysis.py`, `performance_matrix.csv`, figures | Completed final records only | Exercise 1 |
 | Exercise 1.4: reflection on failures, benchmarks, reasoning, agent idea | `report_outline.md` prompts; selected traces | Actual failures, traces, and outcomes | Exercise 1 discussion |
 | Exercise 2.1: Ass2-2 archive and README | `package_submission.py` | Archive contents and README completed with actual evidence | Appendix / submitted archive |
@@ -23,7 +23,7 @@ future real runs.
 
 ## Design decisions
 
-- **Baseline:** unmodified BALROG `naive` agent.
+- **Baseline:** BALROG `naive` decision rule, with the same instruction and action filter, wrapped for logging and budget accounting.
 - **Planning condition:** one actor call per step, producing a bounded plan,
   subgoal, expected observable outcome, and one action.
 - **Reflection condition:** the same planner plus an evidence-only critic call
@@ -31,7 +31,7 @@ future real runs.
   state for each episode. This is *Reflexion-inspired within-episode
   reflection*, not a reproduction of Reflexion's cross-trial episodic memory.
 - **Benchmarks:** BabyAI uses BALROG's binary mission progression. Crafter
-  uses its final count of achievements divided by 22. They are reported in
+  uses its final count of achievements divided by 22, with a 250-step evaluation (not a reproduction of the original 1000-step setting). They are reported in
   separate rows and are never averaged together.
 - **Comparison:** ten matched task/seed episodes are planned per
   model × benchmark × agent final cell. The small fixed-seed repeat subset

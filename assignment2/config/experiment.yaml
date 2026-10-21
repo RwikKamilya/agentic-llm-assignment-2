@@ -14,23 +14,23 @@ agent:
 execution:
   client_max_retries: 2
   retry_delay_seconds: 2
+  request_timeout_seconds: 60
 
-# These are intentionally conservative guardrails, not a claim about a
-# provider's live price. Verify current pricing and replace them before a run.
+# Standard GPT-4o mini prices verified 2026-10-16 against official OpenAI docs.
+# Cached input discounts are deliberately not assumed.
 budget:
-  # One persistent ledger covers every Gemini request across smoke, pilot,
-  # final, retries, and Slurm resubmissions.
-  total_ceiling_usd: 10.00
+  # Historical charges/reservations stay in the same cumulative ledger.
+  total_ceiling_usd: 60.00
   max_input_tokens_per_call: 8192
   max_output_tokens_per_call: 384
-  conservative_input_usd_per_million: 1.00
-  conservative_output_usd_per_million: 4.00
+  conservative_input_usd_per_million: 0.15
+  conservative_output_usd_per_million: 0.60
 
 models:
-  gemini_flash_lite:
-    client_name: gemini
-    model_id: gemini-2.5-flash-lite
-    hosting_method: gemini_developer_api
+  openai_mini:
+    client_name: openai
+    model_id: gpt-4o-mini-2024-07-18
+    hosting_method: openai_api
     temperature: 0.2
     max_output_tokens: 384
   qwen_7b_local:
@@ -69,7 +69,8 @@ benchmarks:
         - {task: BabyAI-MixedTrainLocal-v0/putnext, seed: 3109}
         - {task: BabyAI-MixedTrainLocal-v0/pick_up_seq_go_to, seed: 3110}
   crafter:
-    max_steps: 1000
+    # A 250-step evaluation, not a reproduction of the original 1000-step setting.
+    max_steps: 250
     episodes:
       smoke:
         - {task: default, seed: 401}
@@ -96,26 +97,27 @@ benchmarks:
 
 phases:
   smoke:
-    models: [gemini_flash_lite]
+    models: [openai_mini, qwen_7b_local]
+    max_steps: {babyai: 32, crafter: 32}
     agents: [naive, planning, reflective_planning]
     benchmarks: [babyai, crafter]
   development:
-    models: [gemini_flash_lite, qwen_7b_local]
+    models: [openai_mini, qwen_7b_local]
     agents: [naive, planning, reflective_planning]
     benchmarks: [babyai, crafter]
   pilot:
-    models: [gemini_flash_lite, qwen_7b_local]
+    models: [openai_mini, qwen_7b_local]
     agents: [naive, planning, reflective_planning]
     benchmarks: [babyai, crafter]
   final:
-    models: [gemini_flash_lite, qwen_7b_local]
+    models: [openai_mini, qwen_7b_local]
     agents: [naive, planning, reflective_planning]
     benchmarks: [babyai, crafter]
     # These runs quantify model sampling variability on one unchanged setting.
     # They are not independent task samples and are analysed separately.
     repeated_runs:
       - name: fixed_seed_variability
-        models: [gemini_flash_lite, qwen_7b_local]
+        models: [openai_mini, qwen_7b_local]
         agents: [naive, planning, reflective_planning]
         benchmark: babyai
         task: BabyAI-MixedTrainLocal-v0/goto

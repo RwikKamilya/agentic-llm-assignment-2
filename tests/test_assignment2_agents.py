@@ -113,6 +113,18 @@ class AssignmentAgentTests(unittest.TestCase):
         agent = PlanningAgent(lambda: client, self.make_builder(), self.make_config())
         with self.assertRaises(ModelCallError):
             agent.act(observation())
+        self.assertEqual(agent.call_trace[-1]["error"], "RuntimeError")
+
+    def test_critic_trace_survives_a_failed_following_actor_call(self):
+        config = self.make_config()
+        config.agent["reflection_interval"] = 1
+        client = FakeClient([actor_reply(), "LESSONS:\n- Check the door.", RuntimeError("offline failure")])
+        agent = ReflectivePlanningAgent(lambda: client, self.make_builder(), config)
+        agent.act(observation())
+        with self.assertRaises(ModelCallError):
+            agent.act(observation(), prev_action="go forward")
+        self.assertEqual(agent.call_trace[1]["role"], "critic")
+        self.assertIn("Check the door", agent.call_trace[1]["raw_response"])
 
     def test_logged_naive_keeps_the_existing_naive_action_filter(self):
         client = FakeClient(["ACTION: go forward!!!"])

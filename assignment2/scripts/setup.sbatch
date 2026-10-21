@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Setup runs on an allocated compute node. It does not call Gemini or run any
+# Setup runs on an allocated compute node. It does not call cloud APIs or run any
 # benchmark episode. The user supplies --chdir, --output, and --error to sbatch.
 #SBATCH --job-name=assignment2-setup
 #SBATCH --partition=L40s_students
@@ -24,10 +24,8 @@ fi
 
 REPO_ROOT="$ASS2_ROOT/repo"
 PYTHON_VERSION="3.11.11"
-PYTHON_PREFIX="$ASS2_ROOT/python/cpython-$PYTHON_VERSION"
-BASE_PYTHON="$PYTHON_PREFIX/bin/python3.11"
-EVAL_ENV="$ASS2_ROOT/envs/balrog"
-SERVE_ENV="$ASS2_ROOT/envs/vllm"
+EVAL_ENV="$ASS2_ROOT/envs/balrog-prebuilt"
+SERVE_ENV="$ASS2_ROOT/envs/vllm-prebuilt"
 EVAL_PYTHON="$EVAL_ENV/bin/python"
 SERVE_PYTHON="$SERVE_ENV/bin/python"
 CACHE_ROOT="$ASS2_ROOT/cache"
@@ -47,7 +45,7 @@ if [[ ! "$MIN_FREE_GB" =~ ^[1-9][0-9]*$ ]]; then
   exit 1
 fi
 
-for command_name in curl tar make gcc git wget unzip nvidia-smi; do
+for command_name in curl tar git nvidia-smi; do
   if ! command -v "$command_name" >/dev/null 2>&1; then
     echo "Required setup command is unavailable: $command_name" >&2
     exit 1
@@ -61,7 +59,6 @@ done
 export TMPDIR="$BUILD_ROOT/tmp-$SLURM_JOB_ID"
 export TEMP="$TMPDIR"
 export TMP="$TMPDIR"
-export HOME="$ASS2_ROOT/home"
 export PIP_CACHE_DIR="$PACKAGE_CACHE"
 export XDG_CACHE_HOME="$CACHE_ROOT/xdg"
 export HF_HOME="$MODEL_CACHE/huggingface"
@@ -72,7 +69,7 @@ export VLLM_CACHE_ROOT="$MODEL_CACHE/vllm"
 export TORCH_HOME="$MODEL_CACHE/torch"
 export TRITON_CACHE_DIR="$MODEL_CACHE/triton"
 export PIP_NO_INPUT=1
-mkdir -p "$HOME" "$TMPDIR" "$XDG_CACHE_HOME" "$HF_HOME" "$VLLM_CACHE_ROOT" "$TORCH_HOME" "$TRITON_CACHE_DIR"
+mkdir -p "$TMPDIR" "$XDG_CACHE_HOME" "$HF_HOME" "$VLLM_CACHE_ROOT" "$TORCH_HOME" "$TRITON_CACHE_DIR"
 
 check_free_space() {
   local available_kb
@@ -88,42 +85,47 @@ if command -v quota >/dev/null 2>&1; then
   quota -s || echo "quota did not report a usable limit; verify quota/retention separately."
 fi
 
-if [[ ! -x "$BASE_PYTHON" ]]; then
-  PYTHON_ARCHIVE="$BUILD_ROOT/Python-$PYTHON_VERSION.tgz"
-  PYTHON_SOURCE="$BUILD_ROOT/Python-$PYTHON_VERSION"
-  if [[ ! -f "$PYTHON_ARCHIVE" ]]; then
-    curl --fail --location --retry 3 --output "$PYTHON_ARCHIVE" \
-      "https://www.python.org/ftp/python/$PYTHON_VERSION/Python-$PYTHON_VERSION.tgz"
-  fi
-  if [[ ! -d "$PYTHON_SOURCE" ]]; then
-    tar -xzf "$PYTHON_ARCHIVE" -C "$BUILD_ROOT"
-  fi
-  (
-    cd "$PYTHON_SOURCE"
-    ./configure --prefix="$PYTHON_PREFIX" --with-ensurepip=install
-    make -j "$SLURM_CPUS_PER_TASK"
-    make install
-  )
+# Use a complete prebuilt interpreter instead of compiling CPython.
+export UV_PYTHON_INSTALL_DIR="$ASS2_ROOT/python/uv-managed"
+export UV_PYTHON_BIN_DIR="$ASS2_ROOT/tools/python-bin"
+export UV_CACHE_DIR="$CACHE_ROOT/uv"
+
+UV="$ASS2_ROOT/tools/uv/uv"
+if [[ ! -x "$UV" ]]; then
+  curl --fail --location --retry 3 \
+    https://astral.sh/uv/install.sh \
+    --output "$SETUP_RECORD/install-uv.sh"
+
+  UV_UNMANAGED_INSTALL="$ASS2_ROOT/tools/uv" \
+    sh "$SETUP_RECORD/install-uv.sh"
 fi
 
-if [[ ! -x "$BASE_PYTHON" ]]; then
-  echo "User-space Python installation did not produce $BASE_PYTHON" >&2
-  exit 1
-fi
-"$BASE_PYTHON" -c 'import ssl, sys; assert sys.version_info[:2] == (3, 11); print(sys.version)'
+"$UV" --version
+"$UV" python install "$PYTHON_VERSION"
+BASE_PYTHON="$("$UV" python find --managed-python "$PYTHON_VERSION")"
+
+"$BASE_PYTHON" -c '
+import ssl, ctypes, sqlite3, bz2, lzma, zlib, multiprocessing, sys
+assert sys.version_info[:2] == (3, 11)
+print("Interpreter validation passed:", sys.executable)
+print(sys.version)
+'
 
 if [[ ! -x "$EVAL_PYTHON" ]]; then
   "$BASE_PYTHON" -m venv "$EVAL_ENV"
 fi
-"$EVAL_PYTHON" -m pip install --upgrade pip setuptools wheel
-"$EVAL_PYTHON" -m pip install --editable "$REPO_ROOT"
+"$EVAL_PYTHON" -m pip install --upgrade pip "setuptools==80.9.0" wheel
+"$EVAL_PYTHON" -m pip install --editable "$REPO_ROOT" matplotlib
+"$EVAL_PYTHON" -m pip install "setuptools==80.9.0"
+"$EVAL_PYTHON" -c 'import pkg_resources; print("pkg_resources available")'
+"$EVAL_PYTHON" -m pip check
 
-# BALROG documents this asset preparation step. It downloads benchmark assets
-# only; it does not start an agent, call Gemini, or run an episode.
+
+# BabyAI and Crafter need no optional BALROG asset downloads.
 mkdir -p "$SETUP_RECORD/balrog-assets"
 (
   cd "$SETUP_RECORD/balrog-assets"
-  "$EVAL_PYTHON" -m balrog.scripts.post_install
+  echo "Skipping optional benchmark asset downloads for BabyAI/Crafter setup."
 )
 
 if [[ ! -x "$SERVE_PYTHON" ]]; then
@@ -131,6 +133,7 @@ if [[ ! -x "$SERVE_PYTHON" ]]; then
 fi
 "$SERVE_PYTHON" -m pip install --upgrade pip setuptools wheel
 "$SERVE_PYTHON" -m pip install vllm
+"$SERVE_PYTHON" -m pip check
 
 "$REPO_ROOT/assignment2/scripts/check_python_environments.sh" "$EVAL_PYTHON" "$SERVE_PYTHON"
 "$EVAL_PYTHON" -m unittest discover -s "$REPO_ROOT/tests" -v
