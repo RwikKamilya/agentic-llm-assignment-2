@@ -186,21 +186,24 @@ if [[ " $MODELS " == *" qwen_7b_local "* ]]; then
   fi
   "$REPO_ROOT/assignment2/scripts/start_vllm.sh"
   SERVER_STARTED=1
-  for attempt in $(seq 1 450); do
+  SERVER_READY=0
+  STARTUP_DEADLINE=$((SECONDS + 30 * 60))
+  while (( SECONDS < STARTUP_DEADLINE )); do
     if ! kill -0 "$(cat "$LOG_DIRECTORY/vllm.pid")" 2>/dev/null; then
       echo "The job's vLLM process exited; check $LOG_DIRECTORY/vllm.log" >&2
       exit 1
     fi
     if curl -fsS --max-time 5 http://127.0.0.1:8080/v1/models > "$LOG_DIRECTORY/models.json" 2>/dev/null; then
       "$EVAL_PYTHON" -c 'import json, sys; data = json.load(open(sys.argv[1])); assert sys.argv[2] in [item["id"] for item in data["data"]], "Unexpected model at local endpoint"' "$LOG_DIRECTORY/models.json" "$MODEL_ID"
+      SERVER_READY=1
       break
     fi
     sleep 2
-    if [[ "$attempt" == "450" ]]; then
-      echo "vLLM did not become ready. Check $LOG_DIRECTORY/vllm.log" >&2
-      exit 1
-    fi
   done
+  if [[ "$SERVER_READY" != 1 ]]; then
+    echo "vLLM did not become ready within the startup deadline. Check $LOG_DIRECTORY/vllm.log" >&2
+    exit 1
+  fi
 fi
 
 AVAILABLE_EXPERIMENT_SECONDS=$((JOB_TIME_LIMIT_SECONDS - CLEANUP_RESERVE_MINUTES * 60 - TERMINATION_GRACE_SECONDS - SECONDS))

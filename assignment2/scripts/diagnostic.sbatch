@@ -7,7 +7,7 @@
 #SBATCH --cpus-per-task=4
 #SBATCH --mem=32G
 #SBATCH --gres=gpu:nvidia_l40s:1
-#SBATCH --time=00:30:00
+#SBATCH --time=01:00:00
 set -euo pipefail
 : "${SLURM_JOB_ID:?Run inside a Slurm allocation.}"
 : "${ASS2_ROOT:?Set ASS2_ROOT=/data/s4822285/assignment2.}"
@@ -216,7 +216,8 @@ fi
 assignment2/scripts/start_vllm.sh
 SERVER_STARTED=1
 ready=0
-for attempt in $(seq 1 450); do
+STARTUP_DEADLINE=$((SECONDS + 30 * 60))
+while (( SECONDS < STARTUP_DEADLINE )); do
   kill -0 "$(cat "$ASSIGNMENT2_LOG_DIRECTORY/vllm.pid")" 2>/dev/null || {
     echo "vLLM exited; inspect $ASSIGNMENT2_LOG_DIRECTORY/vllm.log" >&2
     exit 1

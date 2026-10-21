@@ -97,6 +97,12 @@ set the key privately in this submitting shell (never display or paste its value
 into chat). A 5 GiB visible-filesystem guard below is not a personal quota claim;
 check any exposed quota separately. Shared storage can fill between checks.
 The experiment resources remain one L40S GPU, four CPUs, 32G and 12 hours.
+Cold serving imports/startup were slow on this machine. The launcher allows
+a 30-minute readiness deadline, sleeping two seconds between checks; each HTTP
+check also has a five-second timeout (at most one polling cycle beyond the deadline).
+Startup time is deducted from the same
+12-hour allocation before reserving cleanup time. The full diagnostic allows
+one hour; it is separate from experiment jobs.
 
 ```bash
 set -euo pipefail
