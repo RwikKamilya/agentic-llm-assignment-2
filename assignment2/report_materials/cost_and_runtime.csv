@@ -1,0 +1,5 @@
+version,model,scope,episodes,calls,actor_calls,critic_calls,input_tokens,output_tokens,estimated_api_cost_usd,final_phase_elapsed_seconds,note
+v1,openai_mini,all final episodes including repeats,69,5819,5369,450,4272310,175873,0.7463703,22515.195355,Provider invoice unavailable. Qwen API charge zero excludes hardware cost. Elapsed includes local bookkeeping.
+v1,qwen_7b_local,all final episodes including repeats,69,6132,5670,462,4834312,126493,0.0,9311.060151,Provider invoice unavailable. Qwen API charge zero excludes hardware cost. Elapsed includes local bookkeeping.
+v2,openai_mini,all final episodes including repeats,69,5953,5572,381,4258965,227909,0.7755901500000003,18915.368315,Provider invoice unavailable. Qwen API charge zero excludes hardware cost. Elapsed includes local bookkeeping.
+v2,qwen_7b_local,all final episodes including repeats,69,7010,6526,484,5051501,193681,0.0,6439.833126,Provider invoice unavailable. Qwen API charge zero excludes hardware cost. Elapsed includes local bookkeeping.

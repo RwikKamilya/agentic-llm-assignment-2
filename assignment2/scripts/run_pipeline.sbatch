@@ -24,15 +24,15 @@ if [[ -z "${SLURM_JOB_ID:-}" ]]; then
   exit 1
 fi
 
-REPO_ROOT="$ASS2_ROOT/repo"
+REPO_ROOT="${ASS2_REPO_ROOT:-$ASS2_ROOT/repo}"
 EVAL_PYTHON="$ASS2_ROOT/envs/balrog-prebuilt/bin/python"
 SERVE_PYTHON="$ASS2_ROOT/envs/vllm-prebuilt/bin/python"
 CACHE_ROOT="$ASS2_ROOT/cache"
 MODEL_CACHE="$CACHE_ROOT/models"
 PACKAGE_CACHE="$CACHE_ROOT/pip"
-RESULTS_ROOT="$ASS2_ROOT/results"
+RESULTS_ROOT="${ASS2_CAMPAIGN_ROOT:-$ASS2_ROOT/results}"
 LOG_DIRECTORY="$ASS2_ROOT/logs/vllm-$SLURM_JOB_ID"
-PHASE="${ASS2_PHASE:?Set ASS2_PHASE to smoke or final.}"
+PHASE="${ASS2_PHASE:?Set ASS2_PHASE to campaign, smoke or final.}"
 MODELS="${ASS2_MODELS:?Set ASS2_MODELS to one or more configured profiles.}"
 MIN_FREE_GB="${ASS2_MIN_FREE_GB:?Set a quota-aware minimum free-space threshold in GiB.}"
 CLEANUP_RESERVE_MINUTES="${ASS2_CLEANUP_RESERVE_MINUTES:-30}"
@@ -45,8 +45,8 @@ if [[ ! -d "$REPO_ROOT" || ! -f "$REPO_ROOT/assignment2/config/experiment.yaml" 
   echo "Expected repository is missing or incomplete: $REPO_ROOT" >&2
   exit 1
 fi
-if [[ "$PHASE" != "smoke" && "$PHASE" != "final" ]]; then
-  echo "ASS2_PHASE must be smoke or final." >&2
+if [[ "$PHASE" != "smoke" && "$PHASE" != "final" && "$PHASE" != "campaign" ]]; then
+  echo "ASS2_PHASE must be campaign, smoke or final." >&2
   exit 1
 fi
 read -r -a MODEL_ARGS <<< "$MODELS"
@@ -60,7 +60,7 @@ if [[ ! "$MIN_FREE_GB" =~ ^[1-9][0-9]*$ ]] || [[ ! "$CLEANUP_RESERVE_MINUTES" =~
   exit 1
 fi
 if [[ ! -x "$EVAL_PYTHON" ]]; then
-  echo "Setup environments are missing. Submit assignment2/scripts/setup.sbatch first." >&2
+  echo "The existing prepared evaluation environment is missing; stop and inspect." >&2
   exit 1
 fi
 
@@ -103,7 +103,8 @@ export TRITON_CACHE_DIR="$MODEL_CACHE/triton"
 export ASSIGNMENT2_MODEL_CACHE="$MODEL_CACHE"
 export ASSIGNMENT2_LOG_DIRECTORY="$LOG_DIRECTORY"
 export ASSIGNMENT2_OUTPUT_ROOT="$RESULTS_ROOT"
-export ASSIGNMENT2_BUDGET_LEDGER_PATH="$RESULTS_ROOT/api_spending_ledger.json"
+export ASSIGNMENT2_BUDGET_LEDGER_PATH="$ASS2_ROOT/results/api_spending_ledger.json"
+export MPLBACKEND=Agg
 export ASSIGNMENT2_EVAL_PYTHON="$EVAL_PYTHON"
 export ASSIGNMENT2_SERVE_PYTHON="$SERVE_PYTHON"
 mkdir -p "$XDG_CACHE_HOME"
@@ -123,17 +124,20 @@ if [[ " $MODELS " == *" qwen_7b_local "* ]]; then
   "$REPO_ROOT/assignment2/scripts/check_python_environments.sh" "$EVAL_PYTHON" "$SERVE_PYTHON"
   MODEL_ID="$("$EVAL_PYTHON" -c 'import sys; from omegaconf import OmegaConf; config = OmegaConf.load(sys.argv[1]); print(config.models.qwen_7b_local.model_id)' "$REPO_ROOT/assignment2/config/experiment.yaml")"
   export MODEL_ID
+  MODEL_REVISION="$("$EVAL_PYTHON" -c 'import sys; from omegaconf import OmegaConf; print(OmegaConf.load(sys.argv[1]).models.qwen_7b_local.revision)' "$REPO_ROOT/assignment2/config/experiment.yaml")"
+  PORT="$("$EVAL_PYTHON" -c 'import sys; from urllib.parse import urlparse; from omegaconf import OmegaConf; print(urlparse(OmegaConf.load(sys.argv[1]).models.qwen_7b_local.base_url).port)' "$REPO_ROOT/assignment2/config/experiment.yaml")"
+  export PORT
   QWEN_SNAPSHOT="$("$SERVE_PYTHON" -c '
 import sys
 from pathlib import Path
 from huggingface_hub import snapshot_download
 
-model_id, cache_dir = sys.argv[1:]
-snapshot = Path(snapshot_download(repo_id=model_id, cache_dir=cache_dir, local_files_only=True))
+model_id, cache_dir, revision = sys.argv[1:]
+snapshot = Path(snapshot_download(repo_id=model_id, revision=revision, cache_dir=cache_dir, local_files_only=True))
 if not (snapshot / "config.json").is_file():
     raise RuntimeError(f"Prepared model snapshot has no config.json: {snapshot}")
 print(snapshot)
-' "$MODEL_ID" "$HF_HUB_CACHE")"
+' "$MODEL_ID" "$HF_HUB_CACHE" "$MODEL_REVISION")"
   export ASSIGNMENT2_QWEN_SNAPSHOT="$QWEN_SNAPSHOT"
   echo "Using prepared model snapshot: $QWEN_SNAPSHOT"
 else
@@ -173,15 +177,25 @@ trap cleanup EXIT
 trap 'exit 143' TERM
 trap 'exit 130' INT
 
-# Python holds the exclusive paid-ledger lock for all cloud calls and resumes.
+# No model requests occur until the frozen source and offline boundaries pass.
+"$EVAL_PYTHON" -m unittest discover -s tests -p 'test_assignment2*.py' -q
+"$EVAL_PYTHON" -m assignment2.preflight > "$RESULTS_ROOT/preflight-$MODELS.json"
+"$EVAL_PYTHON" -c 'import matplotlib; print("Analysis dependency OK")'
+if [[ "$MODELS" == "openai_mini" ]]; then
+  if [[ ! -f "$ASSIGNMENT2_BUDGET_LEDGER_PATH" ]]; then
+    echo "Historical cumulative ledger is missing; refusing to start a new spending allowance." >&2
+    exit 1
+  fi
+  "$EVAL_PYTHON" -m assignment2.migrate_budget
+fi
 
 if [[ " $MODELS " == *" qwen_7b_local "* ]]; then
   if ! command -v curl >/dev/null 2>&1; then
     echo "curl is required to check the local vLLM endpoint." >&2
     exit 1
   fi
-  if curl -fsS --max-time 5 http://127.0.0.1:8080/v1/models >/dev/null 2>&1; then
-    echo "Port 8080 already serves a model; refusing to reuse or disturb another server." >&2
+  if curl -fsS --max-time 5 "http://127.0.0.1:$PORT/v1/models" >/dev/null 2>&1; then
+    echo "Configured vLLM port already serves a model; refusing to reuse or disturb another server." >&2
     exit 1
   fi
   "$REPO_ROOT/assignment2/scripts/start_vllm.sh"
@@ -193,7 +207,7 @@ if [[ " $MODELS " == *" qwen_7b_local "* ]]; then
       echo "The job's vLLM process exited; check $LOG_DIRECTORY/vllm.log" >&2
       exit 1
     fi
-    if curl -fsS --max-time 5 http://127.0.0.1:8080/v1/models > "$LOG_DIRECTORY/models.json" 2>/dev/null; then
+    if curl -fsS --max-time 5 "http://127.0.0.1:$PORT/v1/models" > "$LOG_DIRECTORY/models.json" 2>/dev/null; then
       "$EVAL_PYTHON" -c 'import json, sys; data = json.load(open(sys.argv[1])); assert sys.argv[2] in [item["id"] for item in data["data"]], "Unexpected model at local endpoint"' "$LOG_DIRECTORY/models.json" "$MODEL_ID"
       SERVER_READY=1
       break
@@ -206,25 +220,39 @@ if [[ " $MODELS " == *" qwen_7b_local "* ]]; then
   fi
 fi
 
-AVAILABLE_EXPERIMENT_SECONDS=$((JOB_TIME_LIMIT_SECONDS - CLEANUP_RESERVE_MINUTES * 60 - TERMINATION_GRACE_SECONDS - SECONDS))
-if (( AVAILABLE_EXPERIMENT_SECONDS <= 0 )); then
-  echo "The cleanup reserve leaves no time for evaluation." >&2
-  exit 1
-fi
-echo "Evaluation is limited to ${AVAILABLE_EXPERIMENT_SECONDS}s; ${CLEANUP_RESERVE_MINUTES} minute(s) remain reserved for saving and cleanup."
-timeout --signal=TERM --kill-after="$TERMINATION_GRACE_SECONDS" "$AVAILABLE_EXPERIMENT_SECONDS" \
-  "$EVAL_PYTHON" -u -m assignment2.run_experiment --phase "$PHASE" "${RUN_ARGUMENTS[@]}" --models "${MODEL_ARGS[@]}"
+run_phase() {
+  local phase="$1"
+  shift
+  local available=$((JOB_TIME_LIMIT_SECONDS - CLEANUP_RESERVE_MINUTES * 60 - TERMINATION_GRACE_SECONDS - SECONDS))
+  if (( available <= 0 )); then
+    echo "No time remains before the cleanup reserve." >&2
+    return 1
+  fi
+  timeout --signal=TERM --kill-after="$TERMINATION_GRACE_SECONDS" "$available" \
+    "$EVAL_PYTHON" -u -m assignment2.run_experiment --phase "$phase" "$@" --models "$MODELS"
+}
 
-if [[ "$PHASE" == "final" ]]; then
+if [[ "$PHASE" == "campaign" ]]; then
+  if [[ -n "$RESUME_DIRECTORY" ]]; then
+    echo "Use phase=final or smoke explicitly for a reviewed manual resume." >&2
+    exit 1
+  fi
+  mkdir -p "$RESULTS_ROOT/$MODELS"
+  run_phase smoke --run-directory "$RESULTS_ROOT/$MODELS/smoke"
+  RUN_DIRECTORY="$RESULTS_ROOT/$MODELS/final"
+  run_phase final --run-directory "$RUN_DIRECTORY"
+else
+  run_phase "$PHASE" "${RUN_ARGUMENTS[@]}"
+fi
+
+if [[ "$PHASE" == "final" || "$PHASE" == "campaign" ]]; then
   AVAILABLE_ANALYSIS_SECONDS=$((JOB_TIME_LIMIT_SECONDS - CLEANUP_RESERVE_MINUTES * 60 - TERMINATION_GRACE_SECONDS - SECONDS))
   if (( AVAILABLE_ANALYSIS_SECONDS <= 0 )); then
-    echo "No time remains for final analysis before the cleanup reserve." >&2
+    echo "No time remains for analysis; episode files are preserved." >&2
     exit 1
   fi
   timeout --signal=TERM --kill-after="$TERMINATION_GRACE_SECONDS" "$AVAILABLE_ANALYSIS_SECONDS" \
     "$EVAL_PYTHON" -m assignment2.analysis "$RUN_DIRECTORY" --phase final --output "$RUN_DIRECTORY/analysis"
-else
-  echo "Smoke validation finished. Final model jobs analyze their own complete records; combine both final directories for cross-model analysis."
 fi
 
 echo "ASSIGNMENT2_PHASE_OK phase=$PHASE models=$MODELS run=$RUN_DIRECTORY"

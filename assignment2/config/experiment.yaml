@@ -1,6 +1,6 @@
 # Fixed experiment manifest for Assignment 2. Edit and commit this file before
 # a pilot or final run; results store its effective values and fingerprint.
-output_root: assignment2/results
+output_root: assignment2/results/outcome_feedback_v2
 
 agent:
   max_text_history: 6
@@ -8,6 +8,7 @@ agent:
   max_plan_words: 24
   max_subgoal_words: 12
   max_recent_observations: 3
+  state_reserve_bytes: 1536
   reflection_interval: 4
   max_reflection_lessons: 3
 
@@ -17,7 +18,7 @@ execution:
   request_timeout_seconds: 60
   max_episode_attempts: 2
   planned_phases: [smoke, final]
-  prompt_policy: trim_oldest_history_preserve_instructions_and_current_v1
+  prompt_policy: shared_transition_window_fixed_state_reserve_v2
 
 # Standard GPT-4o mini prices verified 2026-10-21 against official OpenAI docs.
 # Cached input discounts are deliberately not assumed.
@@ -26,7 +27,7 @@ budget:
   total_ceiling_usd: 15.00
   recovery_reserve_usd: 1.00
   max_input_tokens_per_call: 4096
-  max_output_tokens_per_call: 256
+  max_output_tokens_per_call: 192
   conservative_input_usd_per_million: 0.15
   conservative_output_usd_per_million: 0.60
 
@@ -36,14 +37,15 @@ models:
     model_id: gpt-4o-mini-2024-07-18
     hosting_method: openai_api
     temperature: 0.2
-    max_output_tokens: 256
+    max_output_tokens: 192
   qwen_7b_local:
     client_name: vllm
     model_id: Qwen/Qwen2.5-7B-Instruct
-    base_url: http://127.0.0.1:8080/v1
+    revision: a09a35458c702b33eeacc393d103063234e8bc28
+    base_url: http://127.0.0.1:18085/v1
     hosting_method: vllm_on_allocated_l40s
     temperature: 0.2
-    max_output_tokens: 256
+    max_output_tokens: 192
 
 benchmarks:
   babyai:
@@ -62,19 +64,19 @@ benchmarks:
         - {task: BabyAI-MixedTrainLocal-v0/open, seed: 2103}
         - {task: BabyAI-MixedTrainLocal-v0/putnext, seed: 2104}
       final:
-        - {task: BabyAI-MixedTrainLocal-v0/goto, seed: 3101}
-        - {task: BabyAI-MixedTrainLocal-v0/pickup, seed: 3102}
-        - {task: BabyAI-MixedTrainLocal-v0/open, seed: 3103}
-        - {task: BabyAI-MixedTrainLocal-v0/putnext, seed: 3104}
-        - {task: BabyAI-MixedTrainLocal-v0/pick_up_seq_go_to, seed: 3105}
-        - {task: BabyAI-MixedTrainLocal-v0/goto, seed: 3106}
-        - {task: BabyAI-MixedTrainLocal-v0/pickup, seed: 3107}
-        - {task: BabyAI-MixedTrainLocal-v0/open, seed: 3108}
-        - {task: BabyAI-MixedTrainLocal-v0/putnext, seed: 3109}
-        - {task: BabyAI-MixedTrainLocal-v0/pick_up_seq_go_to, seed: 3110}
+        - {task: BabyAI-MixedTrainLocal-v0/goto, seed: 5101}
+        - {task: BabyAI-MixedTrainLocal-v0/pickup, seed: 5102}
+        - {task: BabyAI-MixedTrainLocal-v0/open, seed: 5103}
+        - {task: BabyAI-MixedTrainLocal-v0/putnext, seed: 5104}
+        - {task: BabyAI-MixedTrainLocal-v0/pick_up_seq_go_to, seed: 5105}
+        - {task: BabyAI-MixedTrainLocal-v0/goto, seed: 5106}
+        - {task: BabyAI-MixedTrainLocal-v0/pickup, seed: 5107}
+        - {task: BabyAI-MixedTrainLocal-v0/open, seed: 5108}
+        - {task: BabyAI-MixedTrainLocal-v0/putnext, seed: 5109}
+        - {task: BabyAI-MixedTrainLocal-v0/pick_up_seq_go_to, seed: 5110}
   crafter:
-    # A 128-step evaluation, not a reproduction of the original 1000-step setting.
-    max_steps: 128
+    # Short-horizon achievement discovery; not the original 1000-step setting.
+    max_steps: 192
     episodes:
       smoke:
         - {task: default, seed: 401}
@@ -88,16 +90,11 @@ benchmarks:
         - {task: default, seed: 2403}
         - {task: default, seed: 2404}
       final:
-        - {task: default, seed: 3401}
-        - {task: default, seed: 3402}
-        - {task: default, seed: 3403}
-        - {task: default, seed: 3404}
-        - {task: default, seed: 3405}
-        - {task: default, seed: 3406}
-        - {task: default, seed: 3407}
-        - {task: default, seed: 3408}
-        - {task: default, seed: 3409}
-        - {task: default, seed: 3410}
+        - {task: default, seed: 5401}
+        - {task: default, seed: 5402}
+        - {task: default, seed: 5403}
+        - {task: default, seed: 5404}
+        - {task: default, seed: 5405}
 
 phases:
   smoke:
@@ -118,13 +115,10 @@ phases:
     models: [openai_mini, qwen_7b_local]
     agents: [naive, planning, reflective_planning]
     benchmarks: [babyai, crafter]
-    # These runs quantify model sampling variability on one unchanged setting.
-    # They are not independent task samples and are analysed separately.
+    # Two additional samples of four main settings: three observations per
+    # setting including its main run. Extra samples never inflate main n.
     repeated_runs:
-      - name: fixed_seed_variability
-        models: [openai_mini, qwen_7b_local]
-        agents: [naive, planning, reflective_planning]
-        benchmark: babyai
-        task: BabyAI-MixedTrainLocal-v0/goto
-        seed: 3901
-        repeats: 3
+      - {name: babyai_goto_variability, benchmark: babyai, task: BabyAI-MixedTrainLocal-v0/goto, seed: 5101, repeats: 2}
+      - {name: babyai_pickup_variability, benchmark: babyai, task: BabyAI-MixedTrainLocal-v0/pickup, seed: 5102, repeats: 2}
+      - {name: crafter_world1_variability, benchmark: crafter, task: default, seed: 5401, repeats: 2}
+      - {name: crafter_world2_variability, benchmark: crafter, task: default, seed: 5402, repeats: 2}

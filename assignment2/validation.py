@@ -11,6 +11,11 @@ class IncompletePhaseError(RuntimeError):
 
 def completed_record_problems(record, expected, phase):
     problems = []
+    protocol_v2 = expected.get("schema_version", 1) >= 2
+    if protocol_v2:
+        for field in ["schema_version", "protocol_id"]:
+            if record.get(field) != expected.get(field):
+                problems.append(f"mismatched {field}")
     for field in ["episode_key", "config_fingerprint", "spec", "effective_config", "model_profile",
                   "source_commit", "source_files", "runtime_versions", "local_model_snapshot"]:
         if record.get(field) != expected.get(field):
@@ -42,7 +47,8 @@ def completed_record_problems(record, expected, phase):
     for index, step in enumerate(steps):
         trace = step.get("agent_trace", {})
         actor = trace.get("actor", {})
-        if step.get("step") != index or not actor.get("raw_response") or not actor.get("call"):
+        raw_present = isinstance(actor.get("raw_response"), str) if protocol_v2 else bool(actor.get("raw_response"))
+        if step.get("step") != index or not raw_present or not actor.get("call"):
             problems.append("missing actor trace or nonsequential step")
         parsed = actor.get("parse", {})
         if parsed.get("valid") and str(step.get("requested_action", "")).strip():
@@ -50,14 +56,45 @@ def completed_record_problems(record, expected, phase):
         reflection = trace.get("reflection")
         if reflection:
             reflections += 1
-            if not reflection.get("raw_response") or not reflection.get("call"):
+            raw_present = isinstance(reflection.get("raw_response"), str) if protocol_v2 else bool(reflection.get("raw_response"))
+            if not raw_present or not reflection.get("call"):
                 problems.append("missing critic trace")
-            if not reflection.get("parse", {}).get("valid"):
+            if not protocol_v2 and not reflection.get("parse", {}).get("valid"):
                 problems.append("invalid critic response format")
+        if protocol_v2:
+            from assignment2.protocol import ACTIONS, normalize_action
+            benchmark = expected["spec"]["benchmark"]
+            if step.get("normalized_action") != normalize_action(step.get("requested_action"), benchmark):
+                problems.append("incorrect action normalization")
+            if step.get("applied_action") not in ACTIONS[benchmark]:
+                problems.append("unrecognized applied action")
+            invalid = step.get("normalized_action") != step.get("applied_action")
+            if step.get("invalid_action") != invalid:
+                problems.append("incorrect invalid-action flag")
+            feedback = trace.get("environment", {})
+            for key in ["applied_action", "invalid_action", "reward", "terminated", "truncated"]:
+                if feedback.get(key) != step.get(key):
+                    problems.append("environment feedback differs from saved transition")
+            if not isinstance(step.get("observation_after"), dict):
+                problems.append("missing next observation")
+            if index and step.get("observation") != steps[index - 1].get("observation_after"):
+                problems.append("observation transition chain is broken")
     if reflections != expected_critics:
         problems.append("persisted critic traces do not match calls")
-    if not usable:
+    if not protocol_v2 and not usable:
         problems.append("no usable actor output in episode")
+    if protocol_v2:
+        from assignment2.prompts import input_token_upper_bound
+        from balrog.prompt_builder.history import Message
+        traces = record.get("model_call_traces", [])
+        if len(traces) != len(calls):
+            problems.append("missing exact model requests")
+        for trace, call in zip(traces, calls):
+            if trace.get("call") != call or trace.get("role") != call.get("role"):
+                problems.append("model request and usage records differ")
+            messages = trace.get("messages", [])
+            if not messages or input_token_upper_bound([Message(**message) for message in messages]) > expected["effective_config"]["client"]["max_input_tokens"]:
+                problems.append("missing or oversized saved prompt")
     paid = expected["model_profile"]["client_name"] == "openai"
     for call in calls:
         if not 1 <= call.get("attempts", 0) <= 2:

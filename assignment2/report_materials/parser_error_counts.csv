@@ -1,0 +1,15 @@
+version,model,benchmark,agent,role,error,count,note
+v2,openai_mini,babyai,planning,actor,UNCHANGED requires an existing plan,2,Error counts can overlap within a reply; denominator is calls of this role.
+v2,openai_mini,babyai,reflective_planning,actor,UNCHANGED requires an existing plan,2,Error counts can overlap within a reply; denominator is calls of this role.
+v2,openai_mini,babyai,reflective_planning,critic,NO_CHANGE/UNCERTAIN require LESSONS: NONE,77,Error counts can overlap within a reply; denominator is calls of this role.
+v2,openai_mini,crafter,reflective_planning,critic,NO_CHANGE/UNCERTAIN require LESSONS: NONE,106,Error counts can overlap within a reply; denominator is calls of this role.
+v2,qwen_7b_local,babyai,planning,actor,OUTCOME_CHECK needs a status and evidence separated by a semicolon,5,Error counts can overlap within a reply; denominator is calls of this role.
+v2,qwen_7b_local,babyai,planning,actor,UNCHANGED requires an existing plan,318,Error counts can overlap within a reply; denominator is calls of this role.
+v2,qwen_7b_local,babyai,reflective_planning,actor,OUTCOME_CHECK needs a status and evidence separated by a semicolon,4,Error counts can overlap within a reply; denominator is calls of this role.
+v2,qwen_7b_local,babyai,reflective_planning,actor,UNCHANGED requires an existing plan,259,Error counts can overlap within a reply; denominator is calls of this role.
+v2,qwen_7b_local,babyai,reflective_planning,critic,NO_CHANGE/UNCERTAIN require LESSONS: NONE,107,Error counts can overlap within a reply; denominator is calls of this role.
+v2,qwen_7b_local,crafter,planning,actor,OUTCOME_CHECK needs a status and evidence separated by a semicolon,22,Error counts can overlap within a reply; denominator is calls of this role.
+v2,qwen_7b_local,crafter,planning,actor,headings must occur exactly once in the specified order,1,Error counts can overlap within a reply; denominator is calls of this role.
+v2,qwen_7b_local,crafter,planning,actor,missing SUBGOAL section,1,Error counts can overlap within a reply; denominator is calls of this role.
+v2,qwen_7b_local,crafter,reflective_planning,actor,OUTCOME_CHECK needs a status and evidence separated by a semicolon,14,Error counts can overlap within a reply; denominator is calls of this role.
+v2,qwen_7b_local,crafter,reflective_planning,critic,NO_CHANGE/UNCERTAIN require LESSONS: NONE,174,Error counts can overlap within a reply; denominator is calls of this role.

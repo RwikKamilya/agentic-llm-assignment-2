@@ -1,0 +1,16 @@
+{
+  "release": "ass2-v2-09afb9fbcc46",
+  "v1_final_episodes": 138,
+  "v2_final_episodes": 138,
+  "v1_primary_episodes": 120,
+  "v2_primary_episodes": 90,
+  "v2_smoke_episodes": 12,
+  "v2_smoke_cost_usd": 0.0025810499999999997,
+  "v2_final_cost_usd": 0.7755901500000003,
+  "cumulative_ledger_estimated_spend_usd": 1.7301820000000174,
+  "cumulative_ledger_outstanding_reservation_usd": 0.0,
+  "primary_setting_overlap_between_versions": 0,
+  "v2_initial_observation_pairing": "passed",
+  "saved_per_model_matrices_recomputed": "passed",
+  "warning": "Infrastructure validation does not validate the truth of model reasoning or prove a beneficial reflection mechanism."
+}

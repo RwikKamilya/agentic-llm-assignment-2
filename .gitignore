@@ -167,3 +167,14 @@ cython_debug/
 tw-games.zip
 /records
 /records.zip
+
+# Local downloads and workstation metadata. Curated research evidence is tracked
+# under assignment2/evidence; report tables and repaired submission ZIPs are kept.
+.DS_Store
+.idea/
+/assignment2/calcium-backup/
+/assignment2/results/
+/assignment2/logs/
+/assignment2/deployment/
+/assignment2/evidence/unpacked/
+*.zip.tmp

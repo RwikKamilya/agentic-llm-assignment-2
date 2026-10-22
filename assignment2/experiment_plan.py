@@ -7,8 +7,11 @@ def planned_episodes(study_config, phase, model_names):
     for model_name in model_names:
         for benchmark in phase_config.benchmarks:
             entries = study_config.benchmarks[benchmark].episodes[phase]
-            for agent_name in phase_config.agents:
-                for episode in entries:
+            for episode_index, episode in enumerate(entries):
+                agents = list(phase_config.agents)
+                offset = episode_index % len(agents)
+                # Fixed rotation reduces a systematic agent-by-time confound.
+                for agent_name in agents[offset:] + agents[:offset]:
                     specs.append(
                         {
                             "model": model_name,
@@ -26,8 +29,9 @@ def planned_episodes(study_config, phase, model_names):
         repeated_models = [model_name for model_name in configured_models if model_name in model_names]
         repeated_agents = list(repeated.get("agents", phase_config.agents))
         for model_name in repeated_models:
-            for agent_name in repeated_agents:
-                for repeat_index in range(int(repeated.repeats)):
+            for repeat_index in range(int(repeated.repeats)):
+                offset = (repeat_index + 1) % len(repeated_agents)
+                for agent_name in repeated_agents[offset:] + repeated_agents[:offset]:
                     specs.append(
                         {
                             "model": model_name,

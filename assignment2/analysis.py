@@ -44,7 +44,7 @@ def load_records(input_directories, expected_data_kind=None):
     data_kinds = set()
     completed_identities = set()
     for directory in input_directories:
-        for path in Path(directory).glob("episodes/*.json"):
+        for path in sorted(Path(directory).glob("episodes/*.json")):
             try:
                 record = json.loads(path.read_text(encoding="utf-8"))
             except json.JSONDecodeError as error:
@@ -100,6 +100,10 @@ def summary_rows(records):
         actor_calls = sum(call["role"] == "actor" for call in call_records)
         critic_calls = sum(call["role"] == "critic" for call in call_records)
         usage_available_calls = sum(bool(call.get("usage_available")) for call in call_records)
+        steps = [step for item in items for step in item.get("steps", [])]
+        actor_errors = sum(not step.get("agent_trace", {}).get("actor", {}).get("parse", {}).get("valid", True) for step in steps)
+        critic_errors = sum(not step["agent_trace"]["reflection"].get("parse", {}).get("valid", True)
+                            for step in steps if step.get("agent_trace", {}).get("reflection"))
         rows.append(
             {
                 "model": model,
@@ -112,6 +116,13 @@ def summary_rows(records):
                 "success_rate": _mean([float(value) for value in successes]) if successes else None,
                 "mean_steps": _mean([item["outcome"].get("steps", 0) for item in items]),
                 "mean_invalid_actions": _mean([item["outcome"].get("invalid_actions", 0) for item in items]),
+                "actor_format_errors": actor_errors,
+                "critic_format_errors": critic_errors,
+                "normalizations": sum(bool(step.get("normalization_changed")) for step in steps),
+                "invalid_action_rate": _mean([float(bool(step.get("invalid_action"))) for step in steps]),
+                "unchanged_observation_rate": _mean([float(step["observation"] == step["observation_after"])
+                                                    for step in steps if "observation_after" in step]),
+                "output_limit_stops": sum(call.get("status") == "length" for call in call_records),
                 "actor_calls": actor_calls,
                 "critic_calls": critic_calls,
                 "retries": sum(call.get("retries", 0) for call in call_records),
@@ -134,8 +145,8 @@ def summary_rows(records):
                     benchmark, "Read the environment implementation."
                 ),
                 "evaluation_step_limit": step_limit,
-                "evaluation_setting": ("128-step evaluation; not a reproduction of the original 1000-step setting"
-                                       if benchmark == "crafter" and step_limit == 128
+                "evaluation_setting": (f"{step_limit}-step evaluation; not the original 1000-step setting"
+                                       if benchmark == "crafter"
                                        else f"{step_limit}-step evaluation" if step_limit else "Historical limit unavailable"),
             }
         )
@@ -158,7 +169,7 @@ def paired_differences(records, left_agent, right_agent, bootstrap_samples=2000,
         by_key[key][spec["agent"]] = progression
 
     groups = defaultdict(list)
-    for key, agent_scores in by_key.items():
+    for key, agent_scores in sorted(by_key.items()):
         if left_agent in agent_scores and right_agent in agent_scores:
             groups[key[:2]].append(agent_scores[left_agent] - agent_scores[right_agent])
     random_source = random.Random(seed)
@@ -185,6 +196,10 @@ def paired_differences(records, left_agent, right_agent, bootstrap_samples=2000,
                 "sample_sd_difference": _sample_sd(differences),
                 "bootstrap_95_ci_low": lower,
                 "bootstrap_95_ci_high": upper,
+                "wins": sum(value > 0 for value in differences),
+                "ties": sum(value == 0 for value in differences),
+                "losses": sum(value < 0 for value in differences),
+                "interval_note": "Exploratory percentile bootstrap of matched settings; small n, no multiplicity correction. Degenerate intervals do not establish equivalence.",
                 "individual_differences": differences,
             }
         )
@@ -192,34 +207,57 @@ def paired_differences(records, left_agent, right_agent, bootstrap_samples=2000,
 
 
 def repeated_run_variability(records):
-    """Describe stochastic variation without presenting repetitions as new tasks."""
+    """Include the main observation plus its extra samples; never inflate main n."""
+    def setting(record):
+        spec = record["spec"]
+        return (spec["model"], spec["benchmark"], spec["agent"], spec["task"], spec["seed"])
+    repeated_keys = {setting(record) for record in completed_records(records)
+                     if "variability_subset" in record["spec"]}
     grouped = defaultdict(list)
+    for record in completed_records(records):
+        if setting(record) in repeated_keys:
+            grouped[setting(record)].append(record)
+    rows = []
+    for key, items in sorted(grouped.items()):
+        items.sort(key=lambda item: item["spec"].get("repeat_index", 0))
+        values = [item["outcome"]["progression"] for item in items]
+        sequences = {tuple(step["applied_action"] for step in item.get("steps", [])) for item in items}
+        rows.append({"model": key[0], "benchmark": key[1], "agent": key[2], "task": key[3], "seed": key[4],
+                     "n_repeats": len(values), "mean_progression": _mean(values),
+                     "repeat_indices": [item["spec"].get("repeat_index", 0) for item in items],
+                     "progressions": values,
+                     "steps_per_repeat": [item["outcome"].get("steps", 0) for item in items],
+                     "sample_sd_progression": _sample_sd(values), "min_progression": min(values),
+                     "max_progression": max(values), "distinct_action_sequences": len(sequences),
+                     "sample_sd_steps": _sample_sd([item["outcome"].get("steps", 0) for item in items]),
+                     "invalid_actions_per_repeat": [item["outcome"].get("invalid_actions", 0) for item in items],
+                     "interpretation": "Same setting sampled repeatedly, including main run if present; not independent tasks. Equal scores do not imply identical behavior."})
+    return rows
+
+
+def validate_paired_resets(records):
+    """Seed matching is only meaningful if the initial visible task also matches."""
+    initial = {}
+    for record in completed_records(records):
+        if record.get("schema_version", 1) < 2:
+            continue
+        spec = record["spec"]
+        key = (spec["benchmark"], spec["task"], spec["seed"])
+        value = (record["reset"].get("mission"), record["steps"][0]["observation"])
+        if key in initial and initial[key] != value:
+            raise ValueError(f"Paired setting has different initial mission/observation: {key}")
+        initial[key] = value
+
+
+def task_rows(records):
+    groups = defaultdict(list)
     for record in completed_records(records):
         spec = record["spec"]
         if "variability_subset" not in spec:
-            continue
-        value = record["outcome"].get("progression")
-        if isinstance(value, (int, float)):
-            key = (spec["model"], spec["benchmark"], spec["agent"], spec["task"], spec["seed"])
-            grouped[key].append(value)
-    rows = []
-    for key, values in sorted(grouped.items()):
-        rows.append(
-            {
-                "model": key[0],
-                "benchmark": key[1],
-                "agent": key[2],
-                "task": key[3],
-                "seed": key[4],
-                "n_repeats": len(values),
-                "mean_progression": _mean(values),
-                "sample_sd_progression": _sample_sd(values),
-                "min_progression": min(values),
-                "max_progression": max(values),
-                "interpretation": "Repeated sampling of one task/seed; not an independent task-level estimate.",
-            }
-        )
-    return rows
+            groups[(spec["model"], spec["benchmark"], spec["agent"], spec["task"])].append(record["outcome"]["progression"])
+    return [{"model": key[0], "benchmark": key[1], "agent": key[2], "task": key[3],
+             "n": len(values), "mean_progression": _mean(values), "individual_progressions": values}
+            for key, values in sorted(groups.items())]
 
 
 def write_csv(path, rows):
@@ -235,22 +273,33 @@ def write_csv(path, rows):
         writer.writerows(rows)
 
 
-def write_selected_traces(path, records, limit=6):
-    """Export concise raw traces; no fabricated intermediate-progress curve."""
-    lines = ["# Selected episode traces", "", "These are raw action-level records, not training curves.", ""]
-    for record in completed_records(records)[:limit]:
+def write_selected_traces(path, records):
+    """Select best and worst main episode per cell, with deterministic seed ties."""
+    groups = defaultdict(list)
+    for record in completed_records(records):
         spec = record["spec"]
-        lines.append(f"## {spec['model']} | {spec['benchmark']} | {spec['agent']} | seed {spec['seed']}")
-        lines.append("")
-        lines.append(f"Final progression: {record['outcome'].get('progression', 'unavailable')}")
-        lines.append("")
-        for step in record.get("steps", []):
-            actor = step.get("agent_trace", {}).get("actor", {})
-            lines.append(
-                f"- Step {step['step']}: requested `{step['requested_action']}`; applied `{step['applied_action']}`; "
-                f"reward {step['reward']}; parse valid={actor.get('parse', {}).get('valid')}"
-            )
-        lines.append("")
+        if "variability_subset" not in spec:
+            groups[(spec["model"], spec["benchmark"], spec["agent"])].append(record)
+    lines = ["# Trace inspection", "", "Mechanical selection: lowest and highest progression per cell, "
+             "breaking ties by seed. These cases illustrate mechanisms, not their frequency. Full prompts and "
+             "all transitions remain in the linked raw records. Check critic evidence manually; its claims are not ground truth.", ""]
+    for key, items in sorted(groups.items()):
+        items.sort(key=lambda record: (record["outcome"]["progression"], record["spec"]["seed"]))
+        selected = [items[0]] + ([items[-1]] if len(items) > 1 else [])
+        for record in selected:
+            spec = record["spec"]
+            lines += [f"## {' | '.join(key)} | seed {spec['seed']}", "",
+                      f"Task: {spec['task']}; progression: {record['outcome']['progression']}; raw: `{record.get('_path')}`", ""]
+            steps = record.get("steps", [])
+            indices = set(range(min(3, len(steps)))) | set(range(max(0, len(steps)-3), len(steps)))
+            for predicate in [lambda step: step.get("invalid_action"),
+                              lambda step: step.get("agent_trace", {}).get("reflection")]:
+                found = next((i for i, step in enumerate(steps) if predicate(step)), None)
+                if found is not None:
+                    indices.update(range(max(0, found-1), min(len(steps), found+2)))
+            for index in sorted(indices):
+                step = steps[index]
+                lines += [f"### Step {step['step']}", "", "```json", json.dumps(step, indent=2, ensure_ascii=False), "```", ""]
     Path(path).write_text("\n".join(lines), encoding="utf-8")
 
 
@@ -334,11 +383,14 @@ def main():
         model_settings[model_key] = model_value
     if len(settings) != 1:
         raise ValueError("Analysis refuses to mix source versions or prompt/history settings.")
+    validate_paired_resets(records)
     output = Path(arguments.output)
     rows = summary_rows(records)
     paired = paired_differences(records, "planning", "naive")
     paired += paired_differences(records, "reflective_planning", "planning")
+    paired += paired_differences(records, "reflective_planning", "naive")
     write_csv(output / "performance_matrix.csv", rows)
+    write_csv(output / "task_breakdown.csv", task_rows(records))
     write_csv(output / "paired_differences.csv", paired)
     write_csv(output / "repeated_run_variability.csv", repeated_run_variability(records))
     write_selected_traces(output / "selected_traces.md", records)

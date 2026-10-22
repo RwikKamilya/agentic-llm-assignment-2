@@ -1,8 +1,12 @@
 # Assignment 2 requirements map
 
 This implementation map follows the numbered questions in `Ass2Reasoning.pdf`.
-It distinguishes code prepared now from evidence that must be generated during
-future real runs.
+The campaign is now complete: [report_materials/PARTNER_GUIDE.md](report_materials/PARTNER_GUIDE.md)
+maps every question to the verified evidence, explains the remaining validity
+limitations, and provides the three required matrices. The table below is the
+original implementation/evidence plan; its future-tense entries are superseded
+by that completed-run guide. The student report still requires human authorship
+and review.
 
 | Assignment item | Implementation component | Evidence to collect later | Report location |
 |---|---|---|---|
@@ -21,32 +25,26 @@ future real runs.
 | Exercise 3.4-3.5: focus, best benchmark, failures, stability, suitability | Repeated-run subset, paired comparisons, selected traces | Actual results and cautious conclusion | Exercise 3 discussion |
 | Evaluation hints: progression, multiple runs, trace inspection | Fixed task/seed manifest, atomic episode records, analysis and trace export | Progression definitions, variance, manually inspected records | Methods / appendices |
 
-## Design decisions
+## Final design
 
-- **Baseline:** BALROG `naive` decision rule, with the same instruction and action filter, wrapped for logging and budget accounting.
-- **Planning condition:** one actor call per step, producing a bounded plan,
-  subgoal, expected observable outcome, and one action.
-- **Reflection condition:** the same planner plus an evidence-only critic call
-  every four actor steps. It keeps at most three short lessons and resets all
-  state for each episode. This is *Reflexion-inspired within-episode
-  reflection*, not a reproduction of Reflexion's cross-trial episodic memory.
-- **Benchmarks:** BabyAI uses BALROG's binary mission progression. Crafter
-  uses its final count of achievements divided by 22, with a 128-step evaluation (not a reproduction of the original 1000-step setting). They are reported in
-  separate rows and are never averaged together.
-- **Comparison:** ten matched task/seed episodes are planned per
-  model × benchmark × agent final cell. The small fixed-seed repeat subset
-  quantifies sampling variation but is not treated as additional task samples.
-- **Cost comparison:** reflection makes extra critic calls. The report must
-  present calls, tokens, time, and estimated cost alongside progression. An
-  equal-call-budget ablation is optional and intentionally not required for
-  the main evaluation.
+The current, frozen protocol is described in `FINAL_EXPERIMENT.md` and
+`config/experiment.yaml`. It uses an adapted action-only baseline with shared
+corrected rules and normalization; an outcome-checking planner; and the same
+planner with a critic every four completed actions. Reflection is within-episode,
+not cross-trial learning.
 
-## Future model choice
+Each model/agent has ten primary BabyAI settings at 64 steps and five primary
+Crafter worlds at 192 steps. Four existing settings have two additional samples,
+yielding three observations each; these extras never inflate primary sample size.
+The two models are GPT-4o mini and local Qwen2.5-7B-Instruct. All six main cells per
+model, repeats, source/configuration records, costs and uncertainty must be reported.
 
-The local profile proposes `Qwen/Qwen2.5-7B-Instruct` served by vLLM. It is a
-7B instruction model, fits the requested 3-8B range, uses BALROG's existing
-OpenAI-compatible vLLM client, and is a conservative fit for one allocated
-L40S. The allocated GPU memory and the compatible vLLM/CUDA environment still
-need verification on a compute node. This is a deployment plan, not a claim
-that the model is installed or that its quality/availability has been validated
-on LIACS.
+The earlier completed experiment informed this redesign. Keep it labeled as the
+earlier exploratory version. New final evidence must come from the new release's
+results directory. Model availability and runtime integration are checked inside
+the allocated campaign, not inferred from a test using synthetic responses.
+
+An equal-compute ablation is outside this budget. Report the extra calls/tokens/time
+of reflection, and interpret results as comparisons of whole agent procedures.
+Actual results and appropriately qualified claims are now available in the
+completed-run guide; no general improvement from reflection is established.

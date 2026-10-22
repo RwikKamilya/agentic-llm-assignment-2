@@ -32,10 +32,10 @@ CONFIG = ROOT / 'assignment2/config/experiment.yaml'
 class FifteenDollarPlanTests(unittest.TestCase):
     def test_actual_manifest_cost_includes_variability_critics_and_both_attempts(self):
         config = OmegaConf.load(CONFIG)
-        report = planned_budget(config, .203296, 0.)
-        self.assertEqual(report['logical_calls'], {'smoke': 24, 'final': 6841})
-        self.assertAlmostEqual(report['max_new_cost_usd'], 10.544640)
-        self.assertAlmostEqual(report['remaining_after_plan_usd'], 4.252064)
+        report = planned_budget(config, .9520108, 0.)
+        self.assertEqual(report['logical_calls'], {'smoke': 24, 'final': 8505})
+        self.assertAlmostEqual(report['max_new_cost_usd'], 12.4455168)
+        self.assertAlmostEqual(report['remaining_after_plan_usd'], 1.6024724)
         self.assertTrue(report['fits_with_recovery_reserve'])
         self.assertFalse(planned_budget(config, 4., 0.)['fits_with_recovery_reserve'])
         self.assertEqual(len(planned_episodes(config, 'final', list(config.models))), 138)
@@ -63,9 +63,9 @@ class FifteenDollarPlanTests(unittest.TestCase):
                 self_test.assertLessEqual(input_token_upper_bound(messages), 4096)
                 self_test.assertIn('GAME RULES', messages[0].content)
                 self_test.assertIn('CURRENT', messages[-1].content)
-                reply = ('LESSONS:\n- Inspect visible objects before moving.'
+                reply = ('STATUS: CHANGE\nEVIDENCE: visible room\nLESSONS:\n- Inspect visible objects before moving.'
                          if 'You are a critic' in messages[-1].content else
-                         'PLAN: inspect\nSUBGOAL: approach key\nEXPECTED_OUTCOME: key nearby\nACTION: go forward')
+                         'OUTCOME_CHECK: UNCERTAIN; visible room\nPLAN: inspect\nSUBGOAL: approach key\nEXPECTED_OUTCOME: key nearby\nACTION: go forward')
                 self_test.assertLessEqual(len(reply.encode('utf-8')), 256)
                 return LLMResponse('offline', reply, 'stop', 100, 30, None)
         self_test = self
@@ -73,10 +73,10 @@ class FifteenDollarPlanTests(unittest.TestCase):
             client = Client()
             client.seen = []
             builder = HistoryPromptBuilder(max_text_history=6, max_image_history=0, max_cot_history=0)
-            builder.update_instruction_prompt('GAME RULES: ' + 'allowed action. ' * 90)
+            builder.update_instruction_prompt('GAME RULES: ' + 'allowed action. ' * 30)
             agent = ReflectivePlanningAgent(lambda: client, builder, config)
             for index in range(6):
-                obs = {'text': {'long_term_context': 'CURRENT ' + 'visible tile ' * 80,
+                obs = {'text': {'long_term_context': 'CURRENT ' + 'visible tile ' * 35,
                                 'short_term_context': ''}, 'image': None}
                 agent.act(obs, prev_action='go forward' if index else None)
             self.assertEqual(len(client.seen), 7)
@@ -177,7 +177,7 @@ class OpenAIAccountingTests(unittest.TestCase):
     def test_empty_paid_response_keeps_usage_without_retry(self):
         client = self.make_client([response(content='')])
         result = client.generate([Message('user', 'hello')])
-        self.assertEqual(result.stop_reason, 'error_empty_response')
+        self.assertEqual(result.stop_reason, 'empty_response')
         self.assertEqual(result.input_tokens, 100)
         self.assertEqual(client.last_call_attempts, 1)
         client = self.make_client([response(input_tokens=None)])
@@ -189,9 +189,9 @@ class OpenAIAccountingTests(unittest.TestCase):
             ledger = BudgetLedger.load_or_create(15, 4096, 256, .15, .60, path)
             config = OmegaConf.load(ROOT / 'balrog/config/config.yaml')
             config.agent.reflection_interval = 1
-            results = [response('PLAN: explore\nSUBGOAL: move\nEXPECTED_OUTCOME: room\nACTION: go forward'),
-                       TimeoutError(), response('LESSONS:\n- Look first.'),
-                       response('PLAN: explore\nSUBGOAL: move\nEXPECTED_OUTCOME: room\nACTION: go forward')]
+            results = [response('OUTCOME_CHECK: UNCERTAIN; visible room\nPLAN: explore\nSUBGOAL: move\nEXPECTED_OUTCOME: room\nACTION: go forward'),
+                       TimeoutError(), response('STATUS: CHANGE\nEVIDENCE: visible room\nLESSONS:\n- Look first.'),
+                       response('OUTCOME_CHECK: UNCERTAIN; visible room\nPLAN: explore\nSUBGOAL: move\nEXPECTED_OUTCOME: room\nACTION: go forward')]
             client = self.make_client(results)
             builder = HistoryPromptBuilder(max_text_history=6, max_image_history=0, max_cot_history=0)
             agent = ReflectivePlanningAgent(lambda: client, builder, config, ledger)
@@ -225,7 +225,7 @@ class OpenAIAccountingTests(unittest.TestCase):
             migrated = json.loads(path.read_text())
             for field in ['estimated_spent_usd', 'reserved_usd', 'calls']:
                 self.assertEqual(migrated[field], state[field])
-            resumed = BudgetLedger.load_or_create(15, 4096, 256, .15, .60, path)
+            resumed = BudgetLedger.load_or_create(15, 4096, 192, .15, .60, path)
             self.assertAlmostEqual(resumed.reserved_usd, .8)
             self.assertIsNone(migrate_ledger(path, OmegaConf.load(CONFIG).budget))
 
@@ -233,7 +233,8 @@ class OpenAIAccountingTests(unittest.TestCase):
 class FakeEnvironment:
     max_steps = 32
 
-    def __init__(self):
+    def __init__(self, benchmark='babyai'):
+        self.benchmark = benchmark
         self.failed_candidates = []
         self.steps = 0
         self.reset_kwargs = None
@@ -247,7 +248,11 @@ class FakeEnvironment:
         return 'Choose go forward.'
 
     def check_action_validity(self, action):
-        return action
+        from assignment2.protocol import ACTIONS
+        if action in ACTIONS[self.benchmark]:
+            return action
+        self.failed_candidates.append(action)
+        return 'go forward' if self.benchmark == 'babyai' else 'Noop'
 
     def step(self, action):
         self.steps += 1
@@ -287,9 +292,9 @@ class RunnerPreparationTests(unittest.TestCase):
             for spec in runner._episode_specs():
                 config = runner._effective_config(spec)
                 self.assertEqual(config.eval.max_steps_per_episode,
-                                 (5 if spec['agent'] == 'reflective_planning' else 3) if phase == 'smoke' else (64 if spec['benchmark'] == 'babyai' else 128))
+                                 (5 if spec['agent'] == 'reflective_planning' else 3) if phase == 'smoke' else (64 if spec['benchmark'] == 'babyai' else 192))
             if phase == 'final':
-                self.assertEqual(sum('variability_subset' in s for s in runner._episode_specs()), 9)
+                self.assertEqual(sum('variability_subset' in s for s in runner._episode_specs()), 24)
         runner = self.runner(name='fingerprint')
         spec = runner._episode_specs()[0]
         config = runner._effective_config(spec)
@@ -310,8 +315,8 @@ class RunnerPreparationTests(unittest.TestCase):
         class Client:
             def generate(self, messages):
                 return LLMResponse('synthetic-test-client',
-                                   'PLAN: explore\nSUBGOAL: move\nEXPECTED_OUTCOME: room\nACTION: go forward'
-                                   if not any('You are a critic' in message.content for message in messages) else 'LESSONS:\n- Look first.',
+                                   'OUTCOME_CHECK: UNCERTAIN; visible room\nPLAN: explore\nSUBGOAL: move\nEXPECTED_OUTCOME: room\nACTION: go forward'
+                                   if not any('You are a critic' in message.content for message in messages) else 'STATUS: CHANGE\nEVIDENCE: visible room\nLESSONS:\n- Look first.',
                                    'stop', 100, 20, None)
         from assignment2.agents import LoggedNaiveAgent
         kind = {'naive': LoggedNaiveAgent, 'planning': PlanningAgent, 'reflective_planning': ReflectivePlanningAgent}
@@ -320,7 +325,7 @@ class RunnerPreparationTests(unittest.TestCase):
 
     def test_offline_run_trace_validation_resume_and_no_paid_ledger_for_qwen(self):
         runner = self.runner(models=['qwen_7b_local'])
-        with patch('assignment2.runner.make_env', side_effect=lambda *args: FakeEnvironment()):
+        with patch('assignment2.runner.make_env', side_effect=lambda *args: FakeEnvironment(args[0])):
             with patch('assignment2.runner.AgentFactory') as factory:
                 factory.side_effect = lambda config: SimpleNamespace(create_agent=lambda **kw: self.fake_agent(config, **kw))
                 directory = runner.run()
@@ -346,6 +351,21 @@ class RunnerPreparationTests(unittest.TestCase):
         self.assertEqual(len(paths), 1)
         self.assertEqual(json.loads(paths[0].read_text())['status'], 'incomplete')
 
+    def test_empty_and_malformed_model_outputs_are_retained_as_behavior(self):
+        runner = self.runner(models=['qwen_7b_local'])
+        def empty_agent(config, budget_ledger=None):
+            agent = self.fake_agent(config, budget_ledger)
+            agent.client.generate = lambda messages: LLMResponse('synthetic', '', 'empty_response', 100, 0, None)
+            return agent
+        with patch('assignment2.runner.make_env', side_effect=lambda *args: FakeEnvironment(args[0])):
+            with patch('assignment2.runner.AgentFactory') as factory:
+                factory.side_effect = lambda config: SimpleNamespace(create_agent=lambda **kw: empty_agent(config, **kw))
+                directory = runner.run()
+        validation = validate_run_directory(directory)
+        self.assertEqual(validation['completed'], 6)
+        self.assertEqual(validation['parser_failures'], 22)
+        self.assertEqual(validation['invalid_actions'], 22)
+
     def test_manual_resume_cannot_repeat_whole_episodes_without_a_bound(self):
         runner = self.runner(models=['qwen_7b_local'])
         key = 'bounded-recovery'
@@ -359,14 +379,14 @@ class RunnerPreparationTests(unittest.TestCase):
         def reply(**kwargs):
             text = '\n'.join(part['text'] for message in kwargs['messages'] for part in message['content'])
             if 'You are a critic' in text:
-                return response('LESSONS:\n- Observe before moving.')
-            if 'Reply using all four headings' in text:
-                return response('PLAN: explore\nSUBGOAL: move\nEXPECTED_OUTCOME: room\nACTION: go forward')
+                return response('STATUS: CHANGE\nEVIDENCE: visible room\nLESSONS:\n- Observe before moving.')
+            if 'Reply with these five headings' in text:
+                return response('OUTCOME_CHECK: UNCERTAIN; visible room\nPLAN: explore\nSUBGOAL: move\nEXPECTED_OUTCOME: room\nACTION: go forward')
             return response('go forward')
         with patch.dict(os.environ, {'OPENAI_API_KEY': 'offline-test-only'}):
             with patch('balrog.client.OpenAI') as sdk:
                 sdk.return_value.chat.completions.create.side_effect = reply
-                with patch('assignment2.runner.make_env', side_effect=lambda *args: FakeEnvironment()):
+                with patch('assignment2.runner.make_env', side_effect=lambda *args: FakeEnvironment(args[0])):
                     directory = runner.run()
         calls = json.loads(runner.api_ledger_path.read_text())['calls']
         self.assertEqual(sum(c['role'] == 'actor' for c in calls), 22)
@@ -394,7 +414,7 @@ class RunnerPreparationTests(unittest.TestCase):
         runner = self.runner(models=['openai_mini'])
         with patch.dict(os.environ, {'OPENAI_API_KEY': 'offline-test-only'}):
             with patch('balrog.client.OpenAI') as sdk:
-                with patch('assignment2.runner.make_env', side_effect=lambda *args: FakeEnvironment()):
+                with patch('assignment2.runner.make_env', side_effect=lambda *args: FakeEnvironment(args[0])):
                     with self.assertRaises(IncompletePhaseError):
                         runner.run()
                 sdk.return_value.chat.completions.create.assert_not_called()

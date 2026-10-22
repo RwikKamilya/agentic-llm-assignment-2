@@ -1,6 +1,37 @@
 """Conservative text bounds shared by both experimental models."""
 
 import copy
+import json
+
+from balrog.prompt_builder.history import Message
+
+
+def observation_text(observation):
+    text = observation.get("text", {})
+    return "\n".join(str(text.get(key) or "") for key in
+                     ["short_term_context", "long_term_context"]).strip()
+
+
+def shared_evidence(instructions, current, transitions, maximum, state_reserve):
+    """Select evidence before adding agent state, using the same reserve for all.
+
+    Observed line changes are literal text, not a model summary or hidden game
+    state. The latest execution feedback and full current observation always fit
+    or the run fails before making a request. Older complete transitions may go.
+    """
+    latest = {key: transitions[-1][key] for key in
+              ["step", "requested_action", "applied_action", "invalid_action", "reward", "observation_changed"]} if transitions else None
+    current_text = "Current observation:\n" + current + "\nLatest execution feedback: " + json.dumps(latest)
+    messages = [Message("user", instructions)]
+    for transition in transitions:
+        messages.append(Message("user", "Observed transition: " + json.dumps(transition, ensure_ascii=False)))
+    messages.append(Message("user", current_text))
+    prepared, metadata = trim_oldest_history(messages, maximum - state_reserve)
+    metadata.update({"prompt_policy": "shared_transition_window_fixed_state_reserve_v2",
+                     "state_reserve_bytes": state_reserve,
+                     "retained_transitions": len(prepared) - 2,
+                     "evidence_token_upper_bound": input_token_upper_bound(prepared)})
+    return prepared, metadata
 
 
 def input_token_upper_bound(messages):

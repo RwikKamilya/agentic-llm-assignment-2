@@ -8,6 +8,7 @@ atomic assignment records.
 import copy
 import hashlib
 import importlib.metadata
+import importlib.util
 import json
 import os
 import platform
@@ -23,6 +24,7 @@ from assignment2.agents import ModelCallError
 from assignment2.experiment_plan import planned_episodes, step_limit, logical_call_bound, cost_per_logical_call, planned_budget
 from assignment2.budget import BudgetExceeded, BudgetLedger, paid_run_lock
 from assignment2.storage import atomic_json_write, next_attempt_path
+from assignment2.protocol import PROTOCOL_ID, game_instructions, normalize_action
 from assignment2.validation import IncompletePhaseError, completed_record_problems, validate_run_directory
 from balrog.agents import AgentFactory
 
@@ -106,6 +108,17 @@ def runtime_versions():
             versions[name] = importlib.metadata.version(name)
         except importlib.metadata.PackageNotFoundError:
             versions[name] = "unavailable"
+    # The installed MiniGrid fork can share a version number with upstream.
+    # Hash game-engine Python sources as well as recording distribution versions.
+    for name in ["minigrid", "crafter"]:
+        spec = importlib.util.find_spec(name)
+        if spec is None or not spec.submodule_search_locations:
+            versions[f"{name}_source_sha256"] = "unavailable"
+            continue
+        package_root = Path(next(iter(spec.submodule_search_locations)))
+        hashes = {str(path.relative_to(package_root)): hashlib.sha256(path.read_bytes()).hexdigest()
+                  for path in sorted(package_root.rglob("*.py"))}
+        versions[f"{name}_source_sha256"] = fingerprint(hashes)
     return versions
 
 
@@ -168,6 +181,14 @@ class ExperimentRunner:
             raise ValueError("At most two total client attempts are permitted.")
         if float(self.study_config.execution.request_timeout_seconds) <= 0:
             raise ValueError("A positive request timeout is required.")
+        for name, maximum in [("max_plan_words", 24), ("max_subgoal_words", 12),
+                              ("max_recent_observations", 3), ("max_reflection_lessons", 3)]:
+            if not 1 <= int(self.study_config.agent[name]) <= maximum:
+                raise ValueError(f"agent.{name} must be within 1..{maximum} for the fixed prompt policy.")
+        if int(self.study_config.agent.reflection_interval) < 1 or int(self.study_config.agent.state_reserve_bytes) != 1536:
+            raise ValueError("The reflection interval must be positive and the shared state reserve 1536 bytes.")
+        if self.study_config.execution.prompt_policy != "shared_transition_window_fixed_state_reserve_v2":
+            raise ValueError("Manifest prompt policy does not match the implemented protocol.")
         for model_name in self.model_names:
             if model_name not in self.study_config.models:
                 raise ValueError(f"Unknown model profile {model_name!r}.")
@@ -215,6 +236,7 @@ class ExperimentRunner:
         config.agent.max_recent_observations = int(self.study_config.agent.max_recent_observations)
         config.agent.reflection_interval = int(self.study_config.agent.reflection_interval)
         config.agent.max_reflection_lessons = int(self.study_config.agent.max_reflection_lessons)
+        config.agent.state_reserve_bytes = int(self.study_config.agent.state_reserve_bytes)
         config.client.client_name = profile.client_name
         config.client.model_id = profile.model_id
         config.client.base_url = ("https://api.openai.com/v1" if profile.client_name == "openai"
@@ -297,7 +319,8 @@ class ExperimentRunner:
     def _record_header(self, spec, config, episode_key, config_fingerprint):
         profile = self.study_config.models[spec["model"]]
         return {
-            "schema_version": 1,
+            "schema_version": 2,
+            "protocol_id": PROTOCOL_ID,
             "status": "started",
             "run_id": self.run_id,
             "phase": self.phase,
@@ -362,7 +385,8 @@ class ExperimentRunner:
                 record["reset"]["task_kind"] = actual_kind
                 record["reset"]["task_selection_attempts"] = base_environment.task_selection_attempts
             instructions = observation.get("mission") if spec["benchmark"] == "babyai" else None
-            instruction_prompt = environment.get_instruction_prompt(instructions=instructions)
+            instruction_prompt = game_instructions(spec["benchmark"], instructions)
+            record["game_instructions"] = instruction_prompt
             agent.prompt_builder.update_instruction_prompt(instruction_prompt)
             maximum_steps = environment.max_steps
             if config.eval.max_steps_per_episode is not None:
@@ -371,17 +395,24 @@ class ExperimentRunner:
             for step in range(maximum_steps):
                 before_text = dict(observation.get("text", {}))
                 response = agent.act(observation, prev_action=action)
-                applied_action = environment.check_action_validity(response.completion)
-                invalid_action = applied_action != response.completion
+                normalized_action = normalize_action(response.completion, spec["benchmark"])
+                applied_action = environment.check_action_validity(normalized_action)
+                invalid_action = applied_action != normalized_action
                 observation, reward, terminated, truncated, _ = environment.step(applied_action)
+                if not isinstance(observation, dict) or not isinstance(observation.get("text"), dict):
+                    raise ValueError("Environment step did not return a text observation.")
                 episode_return += reward
-                agent.record_environment_feedback(applied_action, invalid_action, reward, terminated, truncated)
+                agent.record_environment_feedback(applied_action, invalid_action, reward, terminated, truncated,
+                                                  observation_after=observation, requested_action=response.completion)
                 record["steps"].append(
                     {
                         "step": step,
                         "observation": before_text,
                         "requested_action": response.completion,
+                        "normalized_action": normalized_action,
+                        "normalization_changed": normalized_action != response.completion,
                         "applied_action": applied_action,
+                        "observation_after": dict(observation["text"]),
                         "invalid_action": invalid_action,
                         "reward": reward,
                         "terminated": terminated,
@@ -393,7 +424,7 @@ class ExperimentRunner:
                 record["model_call_traces"] = agent.call_trace
                 if record_path is not None:
                     atomic_json_write(record_path, record)
-                action = response.completion
+                action = applied_action
                 if terminated:
                     termination_reason = "terminated"
                     break
@@ -463,7 +494,7 @@ class ExperimentRunner:
             header = self._record_header(spec, config, key, config_hash)
             expected.append({field: header[field] for field in
                              ["episode_key", "config_fingerprint", "spec", "effective_config", "model_profile",
-                              "source_commit", "source_files", "runtime_versions", "local_model_snapshot"]})
+                              "source_commit", "source_files", "runtime_versions", "local_model_snapshot", "schema_version", "protocol_id"]})
         paid = any(self.study_config.models[name].client_name == "openai" for name in self.model_names)
         if paid:
             pending = [item for item in expected if item["model_profile"]["client_name"] == "openai"

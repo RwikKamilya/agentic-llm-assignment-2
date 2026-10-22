@@ -42,7 +42,7 @@ def observation(text="You see a key."):
 
 
 def actor_reply(plan="look around", action="go forward"):
-    return f"PLAN: {plan}\nSUBGOAL: inspect the room\nEXPECTED_OUTCOME: a new visible object\nACTION: {action}"
+    return f"OUTCOME_CHECK: UNCERTAIN; inspect evidence\nPLAN: {plan}\nSUBGOAL: inspect the room\nEXPECTED_OUTCOME: a new visible object\nACTION: {action}"
 
 
 class AssignmentAgentTests(unittest.TestCase):
@@ -94,19 +94,21 @@ class AssignmentAgentTests(unittest.TestCase):
         responses = [
             actor_reply(action="a1"),
             actor_reply(action="a2"),
-            "LESSONS:\n- Observe before moving.\n- Avoid repeating blocked actions.\n"
-            "- Use the listed commands.\n- This must be dropped.",
+            "STATUS: CHANGE\nEVIDENCE: blocked action\nLESSONS:\n- Observe before moving.\n- Avoid repeating blocked actions.\n"
+            "- Use the listed commands.",
             actor_reply(action="a3"),
         ]
         client = FakeClient(responses)
         agent = ReflectivePlanningAgent(lambda: client, self.make_builder(), self.make_config())
         agent.act(observation("first"))
-        agent.act(observation("second"), prev_action="a1")
-        agent.act(observation("third"), prev_action="a2")
+        agent.record_environment_feedback("turn left", True, 0, False, False, observation("second"), "a1")
+        agent.act(observation("second"), prev_action="turn left")
+        agent.record_environment_feedback("turn right", True, 0, False, False, observation("third"), "a2")
+        agent.act(observation("third"), prev_action="turn right")
         self.assertEqual(len(agent.lessons), 3)
         self.assertIsNone(agent.last_trace[1]["reflection"])
         self.assertTrue(agent.last_trace[2]["reflection"]["parse"]["valid"])
-        self.assertIn("Prior action: a1", "\n".join(message.content for message in client.messages[2]))
+        self.assertIn('"requested_action": "a1"', "\n".join(message.content for message in client.messages[2]))
 
     def test_model_error_stays_explicit(self):
         client = FakeClient([RuntimeError("network unavailable")])
@@ -118,7 +120,7 @@ class AssignmentAgentTests(unittest.TestCase):
     def test_critic_trace_survives_a_failed_following_actor_call(self):
         config = self.make_config()
         config.agent["reflection_interval"] = 1
-        client = FakeClient([actor_reply(), "LESSONS:\n- Check the door.", RuntimeError("offline failure")])
+        client = FakeClient([actor_reply(), "STATUS: CHANGE\nEVIDENCE: blocked action\nLESSONS:\n- Check the door.", RuntimeError("offline failure")])
         agent = ReflectivePlanningAgent(lambda: client, self.make_builder(), config)
         agent.act(observation())
         with self.assertRaises(ModelCallError):
@@ -126,11 +128,11 @@ class AssignmentAgentTests(unittest.TestCase):
         self.assertEqual(agent.call_trace[1]["role"], "critic")
         self.assertIn("Check the door", agent.call_trace[1]["raw_response"])
 
-    def test_logged_naive_keeps_the_existing_naive_action_filter(self):
+    def test_logged_naive_preserves_raw_action_for_shared_normalizer(self):
         client = FakeClient(["ACTION: go forward!!!"])
         agent = LoggedNaiveAgent(lambda: client, self.make_builder(), self.make_config())
         response = agent.act(observation())
-        self.assertEqual(response.completion, "ACTION: go forward")
+        self.assertEqual(response.completion, "ACTION: go forward!!!")
         self.assertEqual(agent.last_trace[0]["actor"]["raw_response"], "ACTION: go forward!!!")
 
     def test_budget_stops_before_the_next_request(self):

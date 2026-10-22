@@ -15,7 +15,7 @@ nvidia-smi --query-gpu=name,memory.total --format=csv,noheader
 
 MODEL_ID="${MODEL_ID:-Qwen/Qwen2.5-7B-Instruct}"
 MODEL_PATH="${ASSIGNMENT2_QWEN_SNAPSHOT:-$MODEL_ID}"
-PORT="${PORT:-8080}"
+PORT="${PORT:-18085}"
 LOG_DIRECTORY="${ASSIGNMENT2_LOG_DIRECTORY:?Set ASSIGNMENT2_LOG_DIRECTORY to verified non-home storage.}"
 MODEL_CACHE="${ASSIGNMENT2_MODEL_CACHE:?Set ASSIGNMENT2_MODEL_CACHE to verified non-home storage.}"
 SERVE_PYTHON="${ASSIGNMENT2_SERVE_PYTHON:?Set ASSIGNMENT2_SERVE_PYTHON to the serving environment Python executable.}"
@@ -55,6 +55,8 @@ HF_HUB_OFFLINE=1 TRANSFORMERS_OFFLINE=1 "$SERVE_PYTHON" -m vllm.entrypoints.open
   --served-model-name "$MODEL_ID" \
   --host 127.0.0.1 \
   --port "$PORT" \
+  --dtype bfloat16 \
+  --seed 0 \
   --gpu-memory-utilization 0.90 \
   --max-model-len 4352 \
   >"$LOG_DIRECTORY/vllm.log" 2>&1 &

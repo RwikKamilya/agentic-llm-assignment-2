@@ -1,3 +1,17 @@
+# Assignment 2: completed experiment and report handoff
+
+Start with **[the partner guide](assignment2/report_materials/PARTNER_GUIDE.md)** for
+the assignment, implementation, measured results, comparison with the earlier run,
+and report-writing guidance. It distinguishes completed measurements from the
+remaining student report and explains the parser, fallback, and critic limitations.
+
+- [Report tables, figures, and audit](assignment2/report_materials/README.md)
+- [Raw results, logs, exact source snapshots, and offline reproduction](assignment2/evidence/README.md)
+- [Three repaired exercise ZIPs](assignment2/submission_packages/README.md)
+- [Report outline](assignment2/report_outline.md)
+
+The original BALROG project documentation follows.
+
 <p align="center">
   <a href="https://balrogai.com">
     <img src="docs/imgs/balrog_banner.png" width="50%" alt="BALROG Agent" />

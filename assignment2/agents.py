@@ -1,18 +1,15 @@
 """Planning and reflection agents for Assignment 2.
 
-The agents deliberately share one action parser and one bounded state model so
-that their comparison isolates the critic call rather than parsing behaviour.
+All agents share game evidence and action normalization. Planning variants also
+share a structured actor format; reflection adds a scheduled critic call.
 """
 
-import copy
 import re
 from collections import namedtuple
 
 from balrog.agents.base import BaseAgent
-from balrog.prompt_builder.history import Message
 
-from assignment2.budget import BudgetExceeded
-from assignment2.prompts import trim_oldest_history
+from assignment2.prompts import input_token_upper_bound, observation_text, shared_evidence
 
 
 # BALROG consumes response fields rather than a concrete response class.  A
@@ -26,62 +23,72 @@ class ModelCallError(RuntimeError):
     """A model call failed or returned a response marked as an error."""
 
 
-def _compact_text(text, max_words):
+def _compact_text(text, max_words, max_bytes=160):
     """Keep state small while preserving ordinary, readable text."""
     words = str(text or "").strip().split()
-    return " ".join(words[:max_words])
+    return " ".join(words[:max_words]).encode("utf-8")[:max_bytes].decode("utf-8", errors="ignore")
+
+
+def _sections(text, headings):
+    """Require every named section once, in order, with no leading prose."""
+    matches = list(re.finditer(r"^\s*([A-Z_]+)\s*:", str(text or ""), re.MULTILINE | re.IGNORECASE))
+    names = [match.group(1).upper() for match in matches]
+    errors = []
+    for heading in headings:
+        if heading not in names:
+            errors.append(f"missing {heading} section")
+    if names != list(headings):
+        errors.append("headings must occur exactly once in the specified order")
+    if matches and str(text)[:matches[0].start()].strip():
+        errors.append("unexpected text before headings")
+    values = {}
+    for index, match in enumerate(matches):
+        end = matches[index + 1].start() if index + 1 < len(matches) else len(str(text))
+        values[names[index]] = str(text)[match.end():end].strip()
+    for heading in headings:
+        if heading in values and not values[heading]:
+            errors.append(f"empty {heading} section")
+    return values, errors
 
 
 def parse_plan_response(response_text, previous_plan=None):
-    """Parse the strict actor format without guessing a missing action."""
-    text = str(response_text or "")
-    headings = ("PLAN", "SUBGOAL", "EXPECTED_OUTCOME", "ACTION")
-    values = {}
-    for index, heading in enumerate(headings):
-        following = "|".join(headings[index + 1 :])
-        boundary = rf"(?=^\s*(?:{following})\s*:|\Z)" if following else r"\Z"
-        match = re.search(rf"^\s*{heading}\s*:\s*(.*?){boundary}", text, re.IGNORECASE | re.DOTALL | re.MULTILINE)
-        values[heading] = match.group(1).strip() if match else None
-
-    errors = []
-    action = values["ACTION"]
-    if not action:
-        errors.append("missing ACTION section")
-    if values["PLAN"] is None:
-        errors.append("missing PLAN section")
-    if values["SUBGOAL"] is None:
-        errors.append("missing SUBGOAL section")
-    if values["EXPECTED_OUTCOME"] is None:
-        errors.append("missing EXPECTED_OUTCOME section")
-
-    plan = values["PLAN"]
-    if plan and plan.lower() in {"unchanged", "no change", "no changes"}:
+    values, errors = _sections(response_text, ("OUTCOME_CHECK", "PLAN", "SUBGOAL", "EXPECTED_OUTCOME", "ACTION"))
+    check = values.get("OUTCOME_CHECK", "")
+    if check.split(";", 1)[0].strip().upper() not in {"FIRST", "SUPPORTED", "CONTRADICTED", "UNCERTAIN"}:
+        errors.append("invalid OUTCOME_CHECK status")
+    if ";" not in check or not check.split(";", 1)[1].strip():
+        errors.append("OUTCOME_CHECK needs a status and evidence separated by a semicolon")
+    plan = values.get("PLAN")
+    if plan and plan.upper() == "UNCHANGED":
+        if not previous_plan:
+            errors.append("UNCHANGED requires an existing plan")
         plan = previous_plan
-    return {
-        "plan": plan,
-        "subgoal": values["SUBGOAL"],
-        "expected_outcome": values["EXPECTED_OUTCOME"],
-        "action": action,
-        "valid": not errors,
-        "errors": errors,
-    }
+    action = values.get("ACTION")
+    if action and "\n" in action:
+        errors.append("ACTION must contain one line")
+    return {"plan": plan, "subgoal": values.get("SUBGOAL"),
+            "expected_outcome": values.get("EXPECTED_OUTCOME"), "outcome_check": check,
+            "action": action, "valid": not errors, "errors": errors}
 
 
 def parse_reflection_response(response_text, max_lessons):
-    """Extract up to ``max_lessons`` corrective statements from a critic reply."""
-    text = str(response_text or "")
-    match = re.search(r"^\s*LESSONS\s*:\s*(.*)\Z", text, re.IGNORECASE | re.DOTALL | re.MULTILINE)
-    if not match:
-        return {"lessons": [], "valid": False, "errors": ["missing LESSONS section"]}
-
-    candidates = []
-    for line in match.group(1).splitlines():
+    values, errors = _sections(response_text, ("STATUS", "EVIDENCE", "LESSONS"))
+    status = values.get("STATUS", "").upper()
+    if status not in {"CHANGE", "NO_CHANGE", "UNCERTAIN"}:
+        errors.append("invalid reflection status")
+    lessons = []
+    for line in values.get("LESSONS", "").splitlines():
         cleaned = re.sub(r"^\s*(?:[-*]|\d+[.)])\s*", "", line).strip()
-        if cleaned:
-            candidates.append(_compact_text(cleaned, 16))
-    if not candidates:
-        return {"lessons": [], "valid": False, "errors": ["no lesson items"]}
-    return {"lessons": candidates[:max_lessons], "valid": True, "errors": []}
+        if cleaned and cleaned.upper() != "NONE":
+            lessons.append(_compact_text(cleaned, 16, 100))
+    if status == "CHANGE" and not lessons:
+        errors.append("CHANGE requires a lesson")
+    if status in {"NO_CHANGE", "UNCERTAIN"} and lessons:
+        errors.append("NO_CHANGE/UNCERTAIN require LESSONS: NONE")
+    if len(lessons) > max_lessons:
+        errors.append("too many lessons")
+    return {"status": status, "evidence": values.get("EVIDENCE"), "lessons": lessons[:max_lessons],
+            "valid": not errors, "errors": errors}
 
 
 class PlanningAgent(BaseAgent):
@@ -105,52 +112,50 @@ class PlanningAgent(BaseAgent):
         self.step_number = 0
         self.last_trace = []
         self.call_trace = []
-        self._recent_observations = []
-        self._recent_actions = []
+        self.transitions = []
         self.current_observation_text = ""
         self.request_metadata = {}
 
     def _observe(self, observation):
-        text = observation.get("text", {})
-        current = "\n".join(str(text.get(key) or "") for key in ["short_term_context", "long_term_context"]).strip()
-        self.current_observation_text = current
-        self._recent_observations.append(_compact_text(current, 160))
-        self._recent_observations = self._recent_observations[-self.max_recent_observations :]
+        self.current_observation_text = observation_text(observation)
 
-    def _remember_previous_action(self, previous_action):
-        if previous_action is not None:
-            self._recent_actions.append(_compact_text(previous_action, 32))
-            self._recent_actions = self._recent_actions[-self.max_recent_observations :]
+    def _state_text(self):
+        return (f"Previous plan: {self.plan or 'None'}\n"
+                f"Previous subgoal: {self.subgoal or 'None'}\n"
+                f"Prediction for the last action: {self.expected_outcome or 'None'}\n"
+                "Retained lessons (hypotheses, check against evidence): " + "; ".join(self.lessons))
 
     def _actor_instruction(self):
-        plan_text = self.plan or "No plan yet."
-        subgoal_text = self.subgoal or "No subgoal yet."
-        outcome_text = self.expected_outcome or "No expected outcome yet."
-        lessons_text = "\n".join(f"- {lesson}" for lesson in self.lessons) or "- None"
-        return f"""
-Maintain a concise, evidence-based plan for the current episode. Use only the
-game rules, observations, prior actions, and lessons below. Do not claim that
-an unobserved event happened. Choose exactly one action from the listed actions.
+        return ("Choose one allowed action. Check the last prediction against the visible transition; "
+                "revise a contradicted plan. Avoid repeating a failed move or turn cycle without new evidence. "
+                "Do not invent hidden state. Then predict the observable result of your next action.\n"
+                "Use FIRST when there is no previous prediction.\n"
+                + self._state_text() + "\nReply with these five headings, once each, in order:\n"
+                "OUTCOME_CHECK: <FIRST, SUPPORTED, CONTRADICTED or UNCERTAIN>; <visible evidence, up to 12 words>\n"
+                "PLAN: <up to 24 words, or UNCHANGED only if a plan exists>\n"
+                "SUBGOAL: <up to 12 words>\n"
+                "EXPECTED_OUTCOME: <up to 12 words>\n"
+                "ACTION: <one allowed action>\nKeep the reply under 85 words; always include ACTION.")
 
-Current plan: {plan_text}
-Current subgoal: {subgoal_text}
-Expected observable outcome: {outcome_text}
-Corrective lessons:
-{lessons_text}
-
-Reply using all four headings exactly once:
-PLAN: <at most 24 words, or UNCHANGED>
-SUBGOAL: <at most 12 words>
-EXPECTED_OUTCOME: <at most 12 words; observable evidence>
-ACTION: <one valid game action>
-Keep the entire reply below 120 words. Include ACTION even if the plan is unchanged.
-""".strip()
+    def _prepare_messages(self, instruction):
+        maximum = int(getattr(self.client, "max_input_tokens", None) or 4096)
+        reserve = int(self.config.agent.get("state_reserve_bytes", 1536))
+        messages, metadata = shared_evidence(self.prompt_builder.system_prompt or "", self.current_observation_text,
+                                             self.transitions, maximum, reserve)
+        if len(("\n\n" + instruction).encode("utf-8")) > reserve:
+            raise ValueError("Agent state/format exceeds the common state reserve.")
+        messages[-1].content += "\n\n" + instruction
+        metadata["input_token_upper_bound"] = input_token_upper_bound(messages)
+        self.request_metadata = metadata
+        return messages
 
     def _call_model(self, messages, role):
         reservation = None
         max_attempts = max(1, int(getattr(self.client, "max_retries", 1)))
         maximum = int(getattr(self.client, "max_input_tokens", None) or 4096)
-        messages, self.request_metadata = trim_oldest_history(messages, maximum)
+        if input_token_upper_bound(messages) > maximum:
+            raise ValueError("Prepared request exceeds the input bound.")
+        saved_messages = [{"role": message.role, "content": message.content} for message in messages]
         if hasattr(self.client, "validate_request"):
             self.client.validate_request(messages)
         if self.budget_ledger is not None:
@@ -163,7 +168,7 @@ Keep the entire reply below 120 words. Include ACTION even if the plan is unchan
                 attempts = int(getattr(self.client, "last_call_attempts", 1))
                 call_log = self._record_call(reservation, None, None, "exception", attempts)
             self.call_trace.append({"role": role, "raw_response": None, "call": call_log,
-                                    "error": type(error).__name__})
+                                    "error": type(error).__name__, "messages": saved_messages})
             raise ModelCallError(f"{role} call raised {type(error).__name__}") from error
 
         status = str(getattr(response, "stop_reason", "unknown"))
@@ -180,7 +185,9 @@ Keep the entire reply below 120 words. Include ACTION even if the plan is unchan
             call_log = self._record_call(reservation, input_tokens, output_tokens, status, attempts)
         # Keep a critic response even if the following actor request fails.
         self.call_trace.append({"role": role, "raw_response": response.completion,
-                                "stop_reason": status, "call": call_log})
+                                "stop_reason": status, "call": call_log, "messages": saved_messages,
+                                "response_metadata": dict(getattr(self.client, "last_response_metadata", {})),
+                                "prompt_metadata": dict(self.request_metadata)})
         if status.startswith("error"):
             raise ModelCallError(f"{role} call stopped with {status}")
         return response, call_log
@@ -202,24 +209,20 @@ Keep the entire reply below 120 words. Include ACTION even if the plan is unchan
     def act(self, obs, prev_action=None):
         if prev_action is not None:
             self.prompt_builder.update_action(prev_action)
-        self._remember_previous_action(prev_action)
         self.prompt_builder.update_observation(obs)
         self._observe(obs)
         reflection = self._maybe_reflect()
 
-        messages = copy.deepcopy(self.prompt_builder.get_prompt())
-        if not messages or messages[-1].role != "user":
-            raise RuntimeError("BALROG prompt builder did not provide a current user observation.")
-        messages[-1].content += "\n\n" + self._actor_instruction()
+        messages = self._prepare_messages(self._actor_instruction())
 
         response, call_log = self._call_model(messages, "actor")
         parsed = parse_plan_response(response.completion, previous_plan=self.plan)
-        if parsed["plan"]:
-            self.plan = _compact_text(parsed["plan"], self.max_plan_words)
-        if parsed["subgoal"]:
-            self.subgoal = _compact_text(parsed["subgoal"], self.max_subgoal_words)
-        if parsed["expected_outcome"]:
-            self.expected_outcome = _compact_text(parsed["expected_outcome"], self.max_subgoal_words)
+        if parsed["valid"] and parsed["plan"]:
+            self.plan = _compact_text(parsed["plan"], self.max_plan_words, 160)
+        if parsed["valid"] and parsed["subgoal"]:
+            self.subgoal = _compact_text(parsed["subgoal"], self.max_subgoal_words, 90)
+        if parsed["valid"] and parsed["expected_outcome"]:
+            self.expected_outcome = _compact_text(parsed["expected_outcome"], self.max_subgoal_words, 90)
 
         action = parsed["action"] if parsed["valid"] else ""
         trace = {
@@ -249,42 +252,39 @@ Keep the entire reply below 120 words. Include ACTION even if the plan is unchan
             reasoning=self.plan,
         )
 
-    def record_environment_feedback(self, applied_action, invalid_action, reward, terminated, truncated):
-        """Attach observable evaluator feedback to the latest action trace."""
+    def record_environment_feedback(self, applied_action, invalid_action, reward, terminated, truncated,
+                                    observation_after=None, requested_action=None):
+        """Feed the action actually executed and literal observation changes to all agents."""
         if not self.last_trace:
-            return
-        self.last_trace[-1]["environment"] = {
-            "applied_action": applied_action,
-            "invalid_action": bool(invalid_action),
-            "reward": reward,
-            "terminated": bool(terminated),
-            "truncated": bool(truncated),
-        }
+            raise RuntimeError("Cannot record feedback before a decision.")
+        after = observation_text(observation_after) if observation_after is not None else self.current_observation_text
+        before_lines = self.current_observation_text.splitlines()
+        after_lines = after.splitlines()
+        feedback = {"step": self.step_number - 1, "requested_action": str(requested_action or "")[:120],
+                    "applied_action": applied_action, "invalid_action": bool(invalid_action),
+                    "reward": float(reward), "terminated": bool(terminated), "truncated": bool(truncated),
+                    "observation_changed": after != self.current_observation_text,
+                    "no_longer_observed": [line for line in before_lines if line not in after_lines],
+                    "newly_observed": [line for line in after_lines if line not in before_lines]}
+        self.last_trace[-1]["environment"] = feedback
+        if invalid_action:
+            # The prediction concerned the requested action, not the fallback.
+            self.expected_outcome = None
+        self.transitions.append(feedback)
+        self.transitions = self.transitions[-self.max_recent_observations:]
 
 
 class LoggedNaiveAgent(PlanningAgent):
-    """The existing naive decision rule with Assignment 2 logging and budget guards.
-
-    This class deliberately retains BALROG's naive instruction and character
-    filter. It only wraps the model call and stores the raw/parsed output.
-    """
+    """Action-only baseline with the same evidence, feedback and normalization."""
 
     def act(self, obs, prev_action=None):
         if prev_action is not None:
             self.prompt_builder.update_action(prev_action)
-        self._remember_previous_action(prev_action)
         self.prompt_builder.update_observation(obs)
         self._observe(obs)
-        messages = copy.deepcopy(self.prompt_builder.get_prompt())
-        naive_instruction = (
-            "You always have to output one of the above actions at a time and no other text. "
-            "You always have to output an action until the episode terminates."
-        )
-        if not messages or messages[-1].role != "user":
-            raise RuntimeError("BALROG prompt builder did not provide a current user observation.")
-        messages[-1].content += "\n\n" + naive_instruction
+        messages = self._prepare_messages("Output exactly one allowed action and no other text.")
         response, call_log = self._call_model(messages, "actor")
-        parsed_action = re.sub(r"[^a-zA-Z\s:]", "", str(response.completion)).strip()
+        parsed_action = str(response.completion or "").strip()
         trace = {
             "step": self.step_number,
             "actor": {
@@ -321,30 +321,21 @@ class ReflectivePlanningAgent(PlanningAgent):
     def _maybe_reflect(self):
         if self.step_number == 0 or self.step_number % self.reflection_interval != 0:
             return None
-        instruction = getattr(self.prompt_builder, "system_prompt", "") or ""
-        messages = [Message(role="user", content=instruction)]
-        for observation, action in zip(self._recent_observations[:-1], self._recent_actions):
-            messages.append(Message(role="user", content=f"Earlier observation: {observation}\nPrior action: {action}"))
-        last_action = self._recent_actions[-1] if self._recent_actions else "None yet."
-        critic_prompt = f"""
-You are a critic for a game-playing agent. Use only this game instruction and
-the observations and prior submitted actions below. Do not infer hidden state
-or invent rewards. Identify at most {self.max_lessons} short, concrete
-corrections for the next actions, at most 16 words per lesson and 70 words total.
-
-Current observation:
-{self.current_observation_text}
-
-Most recent submitted action: {last_action}
-
-Reply only in this format:
-LESSONS:
-- <one corrective lesson>
-""".strip()
-        messages.append(Message(role="user", content=critic_prompt))
+        instruction = (
+            "You are a critic for the game-playing agent. Review the previous plan and prediction against "
+            "the observed transitions, applied actions, invalid-action flags, reward and current observation. "
+            "Reward zero alone does not prove no progress. Do not infer hidden state. Correct only with evidence; "
+            "otherwise choose NO_CHANGE or UNCERTAIN and retain prior lessons.\n"
+            + self._state_text() + "\nReply with these headings once, in order:\n"
+            "STATUS: <CHANGE, NO_CHANGE or UNCERTAIN>\n"
+            "EVIDENCE: <up to 24 words citing visible evidence>\n"
+            f"LESSONS: <NONE, or up to {self.max_lessons} bullet lessons of at most 16 words each>\n"
+            "Keep the reply under 85 words."
+        )
+        messages = self._prepare_messages(instruction)
         response, call_log = self._call_model(messages, "critic")
         parsed = parse_reflection_response(response.completion, self.max_lessons)
-        if parsed["valid"]:
+        if parsed["valid"] and parsed["status"] == "CHANGE":
             self.lessons = parsed["lessons"]
         return {
             "raw_response": response.completion,

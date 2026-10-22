@@ -275,6 +275,8 @@ class OpenAIWrapper(LLMClientWrapper):
         # Parse after the request retry loop: a malformed paid response must
         # retain its reported usage and must not trigger a second paid request.
         response = self.execute_with_retries(api_call)
+        self.last_response_metadata = {key: getattr(response, key, None)
+                                       for key in ["id", "model", "system_fingerprint", "created"]}
         choices = getattr(response, "choices", None)
         message = getattr(choices[0], "message", None) if choices else None
         content = getattr(message, "content", None)
@@ -284,7 +286,7 @@ class OpenAIWrapper(LLMClientWrapper):
         return LLMResponse(
             model_id=self.model_id,
             completion=content.strip() if valid else "",
-            stop_reason=choices[0].finish_reason if valid else "error_empty_response",
+            stop_reason=choices[0].finish_reason if valid else "empty_response",
             input_tokens=getattr(usage, "prompt_tokens", None),
             output_tokens=getattr(usage, "completion_tokens", None),
             reasoning=None,

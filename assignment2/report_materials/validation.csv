@@ -1,0 +1,7 @@
+version,run,expected,completed,invalid_actions,parser_failures
+v1,results/final_slurm-22876,69,69,805,0
+v1,results/final_slurm-22874,69,69,1573,0
+v2,results/ass2-v2-09afb9fbcc46/openai_mini/final,69,69,254,7
+v2,results/ass2-v2-09afb9fbcc46/qwen_7b_local/final,69,69,1097,903
+v2-smoke,results/ass2-v2-09afb9fbcc46/openai_mini/smoke,6,6,2,2
+v2-smoke,results/ass2-v2-09afb9fbcc46/qwen_7b_local/smoke,6,6,9,9
